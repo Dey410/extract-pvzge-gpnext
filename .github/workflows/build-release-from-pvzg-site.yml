@@ -1,0 +1,378 @@
+name: Build release APK from pvzg_site
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Gzh0821/pvzg_site 的 Release 标签（留空则使用最新正式版）"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-from-pvzg-site-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Gardendless game from pvzg_site
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      UPSTREAM_REPOSITORY: Gzh0821/pvzg_site
+      ANDROID_BUILD_TOOLS_VERSION: 35.0.0
+
+    steps:
+      - name: Check out Android project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+        with:
+          cache-provider: basic
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager_path="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "${sdkmanager_path}" ]]; then
+            echo "sdkmanager not found or not executable: ${sdkmanager_path}" >&2
+            exit 1
+          fi
+
+          "${sdkmanager_path}" \
+            --sdk_root="${ANDROID_HOME}" \
+            "platforms;android-36" \
+            "build-tools;${ANDROID_BUILD_TOOLS_VERSION}"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+
+      - name: Resolve and download pvzg_site Release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p input reports
+          df -h "${GITHUB_WORKSPACE}"
+
+          if [[ -n "${REQUESTED_RELEASE_TAG}" ]]; then
+            gh api \
+              "repos/${UPSTREAM_REPOSITORY}/releases/tags/${REQUESTED_RELEASE_TAG}" \
+              > reports/release.json
+          else
+            gh api \
+              "repos/${UPSTREAM_REPOSITORY}/releases/latest" \
+              > reports/release.json
+          fi
+
+          python3 scripts/pvzg_site_release.py select-asset \
+            --release-json reports/release.json \
+            > reports/selection.json
+
+          release_tag="$(jq -r '.release_tag' reports/selection.json)"
+          game_version="$(jq -r '.game_version' reports/selection.json)"
+          release_url="$(jq -r '.release_url' reports/selection.json)"
+          asset_id="$(jq -r '.asset_id' reports/selection.json)"
+          asset_name="$(jq -r '.asset_name' reports/selection.json)"
+          asset_size="$(jq -r '.asset_size' reports/selection.json)"
+          asset_digest="$(jq -r '.asset_digest' reports/selection.json)"
+
+          gh release download "${release_tag}" \
+            --repo "${UPSTREAM_REPOSITORY}" \
+            --pattern "${asset_name}" \
+            --dir input
+
+          download_path="input/${asset_name}"
+          if [[ ! -s "${download_path}" ]]; then
+            echo "Release asset was not downloaded: ${download_path}" >&2
+            exit 1
+          fi
+
+          actual_asset_size="$(stat --format='%s' "${download_path}")"
+          if [[ "${actual_asset_size}" != "${asset_size}" ]]; then
+            echo "Unexpected Release asset size: ${actual_asset_size}; expected ${asset_size}" >&2
+            exit 1
+          fi
+
+          actual_asset_sha256="$(sha256sum "${download_path}" | awk '{print $1}')"
+          if [[ "${asset_digest}" != sha256:* ]]; then
+            echo "Release asset does not provide a SHA-256 digest: ${asset_digest}" >&2
+            exit 1
+          fi
+          if [[ "${actual_asset_sha256}" != "${asset_digest#sha256:}" ]]; then
+            echo "Release asset SHA-256 does not match GitHub metadata" >&2
+            exit 1
+          fi
+
+          mapfile -t exe_entries < <(
+            unzip -Z1 "${download_path}" | grep -Ei '\.exe$'
+          )
+          if (( ${#exe_entries[@]} != 1 )); then
+            echo "Release asset must contain exactly one EXE; found ${#exe_entries[@]}" >&2
+            printf '%s\n' "${exe_entries[@]}"
+            exit 1
+          fi
+
+          exe_entry="${exe_entries[0]}"
+          exe_path="input/$(basename -- "${exe_entry}")"
+          unzip -p "${download_path}" "${exe_entry}" > "${exe_path}"
+          if [[ ! -s "${exe_path}" ]]; then
+            echo "Unable to extract a usable EXE: ${exe_path}" >&2
+            exit 1
+          fi
+          exe_sha256="$(sha256sum "${exe_path}" | awk '{print $1}')"
+
+          version_code=$((200000 + GITHUB_RUN_NUMBER))
+          if (( version_code > 2100000000 )); then
+            echo "Generated versionCode exceeds Android's supported range: ${version_code}" >&2
+            exit 1
+          fi
+
+          {
+            echo "EXE_PATH=${exe_path}"
+            echo "RELEASE_TAG=${release_tag}"
+            echo "RELEASE_ASSET_NAME=${asset_name}"
+          } >> "${GITHUB_ENV}"
+          {
+            echo "release_tag=${release_tag}"
+            echo "release_url=${release_url}"
+            echo "game_version=${game_version}"
+            echo "asset_id=${asset_id}"
+            echo "asset_name=${asset_name}"
+            echo "asset_size=${asset_size}"
+            echo "asset_digest=${asset_digest}"
+            echo "asset_sha256=${actual_asset_sha256}"
+            echo "exe_sha256=${exe_sha256}"
+            echo "version_code=${version_code}"
+          } >> "${GITHUB_OUTPUT}"
+
+          ls -lh "${download_path}" "${exe_path}"
+          df -h "${GITHUB_WORKSPACE}"
+
+      - name: Install tauri-dumper
+        id: tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install tauri-dumper --version 0.2.2 --locked
+          tauri_dumper_version="$(tauri-dumper --version)"
+          echo "${tauri_dumper_version}"
+          echo "tauri_dumper_version=${tauri_dumper_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify and extract Tauri assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          tauri-dumper verify "${EXE_PATH}"
+          tauri-dumper list "${EXE_PATH}" | tee reports/assets-tree.txt
+          tauri-dumper list "${EXE_PATH}" --json > reports/assets.json
+          mkdir -p extracted
+          tauri-dumper extract "${EXE_PATH}" \
+            -o extracted \
+            --overwrite
+          du -sh extracted
+          df -h "${GITHUB_WORKSPACE}"
+
+      - name: Prepare Android game archive
+        id: game
+        shell: bash
+        env:
+          GAME_VERSION: ${{ steps.release.outputs.game_version }}
+          VERSION_CODE: ${{ steps.release.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/assets
+          game_archive="app/src/main/assets/pvzge_web-master.zip"
+
+          python3 scripts/pvzg_site_release.py prepare-archive \
+            --release-tag "${RELEASE_TAG}" \
+            --asset-name "${RELEASE_ASSET_NAME}" \
+            --extracted-dir extracted \
+            --output "${game_archive}" \
+            > reports/game-archive.json
+
+          unzip -tq "${game_archive}"
+          unzip -Z1 "${game_archive}" \
+            | grep -Fx 'pvzge_web-master/docs/index.html' > /dev/null
+
+          archive_sha256="$(jq -r '.archive_sha256' reports/game-archive.json)"
+          archive_size="$(jq -r '.archive_size' reports/game-archive.json)"
+          file_count="$(jq -r '.file_count' reports/game-archive.json)"
+          resource_size="$(jq -r '.resource_size' reports/game-archive.json)"
+
+          {
+            echo "game_version=${GAME_VERSION}"
+            echo "version_code=${VERSION_CODE}"
+            echo "artifact_name=gardendless-android-${GAME_VERSION}"
+            echo "archive_sha256=${archive_sha256}"
+            echo "archive_size=${archive_size}"
+            echo "file_count=${file_count}"
+            echo "resource_size=${resource_size}"
+          } >> "${GITHUB_OUTPUT}"
+
+          ls -lh "${game_archive}"
+          df -h "${GITHUB_WORKSPACE}"
+
+      - name: Build signed release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash gradlew :app:assembleRelease \
+            --no-daemon \
+            -PversionNameOverride="${{ steps.game.outputs.game_version }}" \
+            -PversionCodeOverride="${{ steps.game.outputs.version_code }}"
+
+      - name: Verify and package APK
+        id: package
+        shell: bash
+        env:
+          ARTIFACT_NAME: ${{ steps.game.outputs.artifact_name }}
+          EXPECTED_VERSION_NAME: ${{ steps.game.outputs.game_version }}
+          EXPECTED_VERSION_CODE: ${{ steps.game.outputs.version_code }}
+          RELEASE_TAG_VALUE: ${{ steps.release.outputs.release_tag }}
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+          RELEASE_ASSET_ID: ${{ steps.release.outputs.asset_id }}
+          RELEASE_ASSET_NAME_VALUE: ${{ steps.release.outputs.asset_name }}
+          RELEASE_ASSET_SIZE: ${{ steps.release.outputs.asset_size }}
+          RELEASE_ASSET_DIGEST: ${{ steps.release.outputs.asset_digest }}
+          RELEASE_ASSET_SHA256: ${{ steps.release.outputs.asset_sha256 }}
+          EXE_SHA256: ${{ steps.release.outputs.exe_sha256 }}
+          TAURI_DUMPER_VERSION: ${{ steps.tooling.outputs.tauri_dumper_version }}
+          GAME_ARCHIVE_SHA256: ${{ steps.game.outputs.archive_sha256 }}
+          GAME_ARCHIVE_SIZE: ${{ steps.game.outputs.archive_size }}
+          GAME_FILE_COUNT: ${{ steps.game.outputs.file_count }}
+          GAME_RESOURCE_SIZE: ${{ steps.game.outputs.resource_size }}
+        run: |
+          set -euo pipefail
+
+          source_apk="app/build/outputs/apk/release/app-release.apk"
+          output_dir="dist"
+          output_apk="${output_dir}/${ARTIFACT_NAME}.apk"
+          if [[ ! -f "${source_apk}" ]]; then
+            echo "Release APK was not generated: ${source_apk}" >&2
+            exit 1
+          fi
+
+          mkdir -p "${output_dir}"
+          cp "${source_apk}" "${output_apk}"
+
+          apksigner_path="${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner"
+          "${apksigner_path}" verify --verbose "${output_apk}"
+
+          apkanalyzer_path="${ANDROID_HOME}/cmdline-tools/latest/bin/apkanalyzer"
+          if [[ ! -x "${apkanalyzer_path}" ]]; then
+            echo "apkanalyzer not found or not executable: ${apkanalyzer_path}" >&2
+            exit 1
+          fi
+
+          actual_version_name="$("${apkanalyzer_path}" manifest version-name "${output_apk}")"
+          actual_version_code="$("${apkanalyzer_path}" manifest version-code "${output_apk}")"
+          if [[ "${actual_version_name}" != "${EXPECTED_VERSION_NAME}" ]]; then
+            echo "Unexpected versionName: ${actual_version_name}" >&2
+            exit 1
+          fi
+          if [[ "${actual_version_code}" != "${EXPECTED_VERSION_CODE}" ]]; then
+            echo "Unexpected versionCode: ${actual_version_code}" >&2
+            exit 1
+          fi
+
+          unzip -Z1 "${output_apk}" \
+            | grep -Fx 'assets/pvzge_web-master.zip' > /dev/null
+
+          apk_sha256="$(sha256sum "${output_apk}" | awk '{print $1}')"
+          apk_size="$(stat --format='%s' "${output_apk}")"
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          {
+            echo "Game version: ${EXPECTED_VERSION_NAME}"
+            echo "Android versionCode: ${EXPECTED_VERSION_CODE}"
+            echo "Upstream repository: ${UPSTREAM_REPOSITORY}"
+            echo "Upstream Release tag: ${RELEASE_TAG_VALUE}"
+            echo "Upstream Release URL: ${RELEASE_URL}"
+            echo "Release asset ID: ${RELEASE_ASSET_ID}"
+            echo "Release asset name: ${RELEASE_ASSET_NAME_VALUE}"
+            echo "Release asset size (bytes): ${RELEASE_ASSET_SIZE}"
+            echo "Release asset metadata digest: ${RELEASE_ASSET_DIGEST}"
+            echo "Release asset SHA-256: ${RELEASE_ASSET_SHA256}"
+            echo "Extracted EXE SHA-256: ${EXE_SHA256}"
+            echo "Tauri dumper: ${TAURI_DUMPER_VERSION}"
+            echo "Game resource files: ${GAME_FILE_COUNT}"
+            echo "Game resource size (bytes): ${GAME_RESOURCE_SIZE}"
+            echo "Game archive size (bytes): ${GAME_ARCHIVE_SIZE}"
+            echo "Game archive SHA-256: ${GAME_ARCHIVE_SHA256}"
+            echo "Android repository: ${GITHUB_REPOSITORY}"
+            echo "Android commit: ${GITHUB_SHA}"
+            echo "Workflow run: ${run_url}"
+            echo "APK filename: ${ARTIFACT_NAME}.apk"
+            echo "APK size (bytes): ${apk_size}"
+            echo "APK SHA-256: ${apk_sha256}"
+          } > "${output_dir}/build-info.txt"
+
+          {
+            echo "apk_sha256=${apk_sha256}"
+            echo "apk_size=${apk_size}"
+            echo "run_url=${run_url}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.game.outputs.artifact_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+
+      - name: Write build summary
+        shell: bash
+        env:
+          ARTIFACT_NAME: ${{ steps.game.outputs.artifact_name }}
+          GAME_VERSION: ${{ steps.game.outputs.game_version }}
+          VERSION_CODE: ${{ steps.game.outputs.version_code }}
+          RELEASE_TAG_VALUE: ${{ steps.release.outputs.release_tag }}
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+          RELEASE_ASSET_NAME_VALUE: ${{ steps.release.outputs.asset_name }}
+          RELEASE_ASSET_SHA256: ${{ steps.release.outputs.asset_sha256 }}
+          GAME_ARCHIVE_SHA256: ${{ steps.game.outputs.archive_sha256 }}
+          APK_SHA256: ${{ steps.package.outputs.apk_sha256 }}
+          APK_SIZE: ${{ steps.package.outputs.apk_size }}
+          RUN_URL: ${{ steps.package.outputs.run_url }}
+        run: |
+          {
+            echo "## pvzg_site Release APK build"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Artifact | \`${ARTIFACT_NAME}\` |"
+            echo "| APK | \`${ARTIFACT_NAME}.apk\` |"
+            echo "| Game version | \`${GAME_VERSION}\` |"
+            echo "| Android versionCode | \`${VERSION_CODE}\` |"
+            echo "| Upstream Release | [\`${RELEASE_TAG_VALUE}\`](${RELEASE_URL}) |"
+            echo "| Release asset | \`${RELEASE_ASSET_NAME_VALUE}\` |"
+            echo "| Release asset SHA-256 | \`${RELEASE_ASSET_SHA256}\` |"
+            echo "| Game archive SHA-256 | \`${GAME_ARCHIVE_SHA256}\` |"
+            echo "| Android commit | \`${GITHUB_SHA}\` |"
+            echo "| APK size | \`${APK_SIZE}\` bytes |"
+            echo "| APK SHA-256 | \`${APK_SHA256}\` |"
+            echo "| Workflow run | ${RUN_URL} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
