@@ -178,6 +178,26 @@ jobs:
             exit 1
           fi
 
+      - name: Install media transcode tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install \
+            --yes \
+            --no-install-recommends \
+            ffmpeg \
+            libavif-bin
+
+          avifenc --version
+          ffmpeg -version
+
+      - name: Transcode PNG and MP3 assets in place
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/transcode-assets.sh docs reports/transcode-summary.txt
+
       - name: Upload extracted assets
         uses: actions/upload-artifact@v4
         with:
@@ -187,4 +207,4 @@ jobs:
             reports/
           if-no-files-found: error
           retention-days: 7
-          compression-level: 0
+          compression-level: 6
