@@ -17,7 +17,7 @@ if [[ ! -d "$DOCS_DIR" ]]; then
   exit 1
 fi
 
-for command_name in avifenc ffmpeg find stat grep head awk date; do
+for command_name in avifenc ffmpeg ffprobe find stat grep head awk date; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "error: required command is unavailable: $command_name" >&2
     exit 1
@@ -147,9 +147,34 @@ transcode_png() {
 transcode_mp3() {
   local file="$1"
   local temporary="${file}.transcoding.${BASHPID}.m4a"
+  local input_sample_rate
+  local output_sample_rate
 
   if has_magic "$file" "ftypM4A"; then
     return 0
+  fi
+
+  if ! input_sample_rate="$(
+    ffprobe \
+      -v error \
+      -select_streams a:0 \
+      -show_entries stream=sample_rate \
+      -of default=noprint_wrappers=1:nokey=1 \
+      "$file"
+  )"; then
+    echo "error: ffprobe could not read the sample rate for $file" >&2
+    return 1
+  fi
+
+  if [[ ! "$input_sample_rate" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: invalid sample rate '$input_sample_rate' for $file" >&2
+    return 1
+  fi
+
+  if ((input_sample_rate > 32000)); then
+    output_sample_rate=$((input_sample_rate / 2))
+  else
+    output_sample_rate=16000
   fi
 
   if ! ffmpeg \
@@ -163,6 +188,8 @@ transcode_mp3() {
     -c:a aac \
     -profile:a aac_low \
     -b:a "$AAC_BITRATE" \
+    -ac 1 \
+    -ar "$output_sample_rate" \
     -threads 1 \
     -map_metadata -1 \
     -movflags +faststart \
@@ -252,6 +279,8 @@ Settings:
   AVIF alpha quality: $AVIF_ALPHA_QUALITY
   AVIF speed: $AVIF_SPEED
   AAC profile / bitrate: AAC-LC / $AAC_BITRATE
+  Audio channels: mono
+  Audio sample rate: max(16000 Hz, input sample rate / 2)
   Parallel workers: $TRANSCODE_JOBS
   Maximum converted/input ratio: $MAX_PERCENT%
 
