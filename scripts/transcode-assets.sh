@@ -8,7 +8,7 @@ REPORT_PATH="${2:-reports/transcode-summary.txt}"
 AVIF_QUALITY="${AVIF_QUALITY:-60}"
 AVIF_ALPHA_QUALITY="${AVIF_ALPHA_QUALITY:-80}"
 AVIF_SPEED="${AVIF_SPEED:-6}"
-AAC_BITRATE="${AAC_BITRATE:-64k}"
+AAC_BITRATE="${AAC_BITRATE:-24k}"
 TRANSCODE_JOBS="${TRANSCODE_JOBS:-$(nproc)}"
 MAX_PERCENT="${MAX_PERCENT:-30}"
 
@@ -216,22 +216,26 @@ fi
 png_new_encoded_bytes=$((png_after_bytes - png_already_encoded_bytes))
 mp3_new_encoded_bytes=$((mp3_after_bytes - mp3_already_encoded_bytes))
 
-if ((png_to_encode_count > 0 && png_new_encoded_bytes * 100 > png_to_encode_bytes * MAX_PERCENT)); then
-  echo "error: converted AVIF files exceed ${MAX_PERCENT}% of their PNG inputs" >&2
-  exit 1
-fi
-
-if ((mp3_to_encode_count > 0 && mp3_new_encoded_bytes * 100 > mp3_to_encode_bytes * MAX_PERCENT)); then
-  echo "error: converted M4A files exceed ${MAX_PERCENT}% of their MP3 inputs" >&2
-  exit 1
-fi
-
 percentage() {
   local after="$1"
   local before="$2"
   awk -v after="$after" -v before="$before" \
     'BEGIN { if (before == 0) print "n/a"; else printf "%.2f%%", after * 100 / before }'
 }
+
+if ((png_to_encode_count > 0 && png_new_encoded_bytes * 100 > png_to_encode_bytes * MAX_PERCENT)); then
+  echo "error: converted AVIF files exceed ${MAX_PERCENT}% of their PNG inputs" \
+    "(input=$png_to_encode_bytes bytes, output=$png_new_encoded_bytes bytes," \
+    "ratio=$(percentage "$png_new_encoded_bytes" "$png_to_encode_bytes"))" >&2
+  exit 1
+fi
+
+if ((mp3_to_encode_count > 0 && mp3_new_encoded_bytes * 100 > mp3_to_encode_bytes * MAX_PERCENT)); then
+  echo "error: converted M4A files exceed ${MAX_PERCENT}% of their MP3 inputs" \
+    "(input=$mp3_to_encode_bytes bytes, output=$mp3_new_encoded_bytes bytes," \
+    "ratio=$(percentage "$mp3_new_encoded_bytes" "$mp3_to_encode_bytes"))" >&2
+  exit 1
+fi
 
 finished_at="$(date +%s)"
 elapsed_seconds=$((finished_at - started_at))
