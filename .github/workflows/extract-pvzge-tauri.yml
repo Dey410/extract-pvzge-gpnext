@@ -40,11 +40,18 @@ jobs:
           RELEASE_TAG="$REQUESTED_RELEASE_TAG"
           if [[ -z "$RELEASE_TAG" ]]; then
             RELEASE_TAG="$(
-              gh release view \
+              gh release list \
                 --repo Gzh0821/pvzg_site \
+                --exclude-drafts \
+                --limit 1 \
                 --json tagName \
-                --jq '.tagName'
+                --jq '.[0].tagName'
             )"
+
+            if [[ -z "$RELEASE_TAG" ]]; then
+              echo "::error::Gzh0821/pvzg_site 没有可用的非草稿 Release"
+              exit 1
+            fi
           fi
 
           ASSET_NAME="$REQUESTED_ASSET_NAME"
