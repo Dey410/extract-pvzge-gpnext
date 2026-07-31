@@ -14,6 +14,11 @@ on:
         required: true
         default: true
         type: boolean
+      enable_audio_lazy_loading:
+        description: "构建时修改运行时代码，使音频仅在播放时加载"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -189,6 +194,15 @@ jobs:
             echo "::error::没有找到 index.html"
             exit 1
           fi
+
+      - name: Patch runtime for lazy DOM audio loading
+        if: ${{ inputs.enable_audio_lazy_loading }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch_audio_runtime.py \
+            docs \
+            reports/audio-runtime-patch.txt
 
       - name: Install media transcode tools
         if: ${{ inputs.enable_compression }}
