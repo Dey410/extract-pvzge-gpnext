@@ -9,6 +9,11 @@ on:
       asset_name:
         description: "Release 中的 ZIP 或 EXE 文件名（留空则自动选择）"
         required: false
+      enable_compression:
+        description: "启用 PNG→AVIF 和 MP3→M4A/AAC 原地转码"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -186,6 +191,7 @@ jobs:
           fi
 
       - name: Install media transcode tools
+        if: ${{ inputs.enable_compression }}
         shell: bash
         run: |
           set -euo pipefail
@@ -200,6 +206,7 @@ jobs:
           ffmpeg -version
 
       - name: Transcode PNG and MP3 assets in place
+        if: ${{ inputs.enable_compression }}
         shell: bash
         run: |
           set -euo pipefail
