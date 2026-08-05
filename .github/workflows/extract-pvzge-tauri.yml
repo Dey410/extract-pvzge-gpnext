@@ -10,7 +10,12 @@ on:
         description: "Release 中的 ZIP 或 EXE 文件名（留空则自动选择）"
         required: false
       enable_compression:
-        description: "启用 PNG→AVIF 和 MP3→M4A/AAC 原地转码"
+        description: "启用 PNG→AVIF 原地转码"
+        required: true
+        default: true
+        type: boolean
+      enable_mp3_transcode:
+        description: "启用 MP3→M4A/AAC 原地转码（可与 PNG 转码独立开关）"
         required: true
         default: true
         type: boolean
@@ -205,7 +210,7 @@ jobs:
             reports/audio-runtime-patch.txt
 
       - name: Install media transcode tools
-        if: ${{ inputs.enable_compression }}
+        if: ${{ inputs.enable_compression || inputs.enable_mp3_transcode }}
         shell: bash
         run: |
           set -euo pipefail
@@ -219,9 +224,12 @@ jobs:
           avifenc --version
           ffmpeg -version
 
-      - name: Transcode PNG and MP3 assets in place
-        if: ${{ inputs.enable_compression }}
+      - name: Transcode assets in place
+        if: ${{ inputs.enable_compression || inputs.enable_mp3_transcode }}
         shell: bash
+        env:
+          ENABLE_PNG_TRANSCODE: ${{ inputs.enable_compression }}
+          ENABLE_MP3_TRANSCODE: ${{ inputs.enable_mp3_transcode }}
         run: |
           set -euo pipefail
           bash scripts/transcode-assets.sh docs reports/transcode-summary.txt

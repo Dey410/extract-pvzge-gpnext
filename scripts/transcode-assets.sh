@@ -11,13 +11,29 @@ AVIF_SPEED="${AVIF_SPEED:-6}"
 AAC_BITRATE="${AAC_BITRATE:-24k}"
 TRANSCODE_JOBS="${TRANSCODE_JOBS:-$(nproc)}"
 MAX_PERCENT="${MAX_PERCENT:-30}"
+ENABLE_PNG_TRANSCODE="${ENABLE_PNG_TRANSCODE:-1}"
+ENABLE_MP3_TRANSCODE="${ENABLE_MP3_TRANSCODE:-1}"
+
+is_enabled() {
+  case "$1" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 if [[ ! -d "$DOCS_DIR" ]]; then
   echo "error: docs directory does not exist: $DOCS_DIR" >&2
   exit 1
 fi
 
-for command_name in avifenc ffmpeg ffprobe find stat grep head awk date; do
+required_commands=(find stat grep head awk date)
+if is_enabled "$ENABLE_PNG_TRANSCODE"; then
+  required_commands+=(avifenc)
+fi
+if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+  required_commands+=(ffmpeg ffprobe)
+fi
+for command_name in "${required_commands[@]}"; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "error: required command is unavailable: $command_name" >&2
     exit 1
@@ -66,32 +82,59 @@ scan_media() {
   done < <(find "$DOCS_DIR" -type f -iname "*${extension}" -print0)
 }
 
-scan_media ".png" "ftypavif"
-png_before_count="$SCAN_COUNT"
-png_before_bytes="$SCAN_BYTES"
-png_already_encoded_count="$SCAN_ENCODED_COUNT"
-png_already_encoded_bytes="$SCAN_ENCODED_BYTES"
+png_before_count=0
+png_before_bytes=0
+png_already_encoded_count=0
+png_already_encoded_bytes=0
+mp3_before_count=0
+mp3_before_bytes=0
+mp3_already_encoded_count=0
+mp3_already_encoded_bytes=0
 
-scan_media ".mp3" "ftypM4A"
-mp3_before_count="$SCAN_COUNT"
-mp3_before_bytes="$SCAN_BYTES"
-mp3_already_encoded_count="$SCAN_ENCODED_COUNT"
-mp3_already_encoded_bytes="$SCAN_ENCODED_BYTES"
+if is_enabled "$ENABLE_PNG_TRANSCODE"; then
+  scan_media ".png" "ftypavif"
+  png_before_count="$SCAN_COUNT"
+  png_before_bytes="$SCAN_BYTES"
+  png_already_encoded_count="$SCAN_ENCODED_COUNT"
+  png_already_encoded_bytes="$SCAN_ENCODED_BYTES"
+fi
 
-if ((png_before_count == 0 || mp3_before_count == 0)); then
-  echo "error: expected both PNG and MP3 files below $DOCS_DIR" >&2
+if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+  scan_media ".mp3" "ftypM4A"
+  mp3_before_count="$SCAN_COUNT"
+  mp3_before_bytes="$SCAN_BYTES"
+  mp3_already_encoded_count="$SCAN_ENCODED_COUNT"
+  mp3_already_encoded_bytes="$SCAN_ENCODED_BYTES"
+fi
+
+if is_enabled "$ENABLE_PNG_TRANSCODE" && ((png_before_count == 0)); then
+  echo "error: expected PNG files below $DOCS_DIR" >&2
   exit 1
 fi
 
-png_to_encode_count=$((png_before_count - png_already_encoded_count))
-png_to_encode_bytes=$((png_before_bytes - png_already_encoded_bytes))
-mp3_to_encode_count=$((mp3_before_count - mp3_already_encoded_count))
-mp3_to_encode_bytes=$((mp3_before_bytes - mp3_already_encoded_bytes))
+if is_enabled "$ENABLE_MP3_TRANSCODE" && ((mp3_before_count == 0)); then
+  echo "error: expected MP3 files below $DOCS_DIR" >&2
+  exit 1
+fi
 
-if avifenc --help 2>&1 | grep -q -- "--qcolor"; then
+png_to_encode_count=0
+png_to_encode_bytes=0
+mp3_to_encode_count=0
+mp3_to_encode_bytes=0
+
+if is_enabled "$ENABLE_PNG_TRANSCODE"; then
+  png_to_encode_count=$((png_before_count - png_already_encoded_count))
+  png_to_encode_bytes=$((png_before_bytes - png_already_encoded_bytes))
+fi
+
+if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+  mp3_to_encode_count=$((mp3_before_count - mp3_already_encoded_count))
+  mp3_to_encode_bytes=$((mp3_before_bytes - mp3_already_encoded_bytes))
+fi
+
+AVIFENC_MODERN=0
+if is_enabled "$ENABLE_PNG_TRANSCODE" && avifenc --help 2>&1 | grep -q -- "--qcolor"; then
   AVIFENC_MODERN=1
-else
-  AVIFENC_MODERN=0
 fi
 
 # Ubuntu 24.04 ships libavif 1.0.4, whose CLI uses 0..63 quantizers.
@@ -210,38 +253,56 @@ transcode_mp3() {
 
 export -f has_magic transcode_png transcode_mp3
 
-echo "Transcoding $png_to_encode_count PNG files with $TRANSCODE_JOBS workers"
-find "$DOCS_DIR" -type f -iname "*.png" -print0 \
-  | xargs -0 -r -n 1 -P "$TRANSCODE_JOBS" bash -c 'transcode_png "$1"' _
-
-echo "Transcoding $mp3_to_encode_count MP3 files with $TRANSCODE_JOBS workers"
-find "$DOCS_DIR" -type f -iname "*.mp3" -print0 \
-  | xargs -0 -r -n 1 -P "$TRANSCODE_JOBS" bash -c 'transcode_mp3 "$1"' _
-
-scan_media ".png" "ftypavif"
-png_after_count="$SCAN_COUNT"
-png_after_bytes="$SCAN_BYTES"
-png_after_encoded_count="$SCAN_ENCODED_COUNT"
-png_after_encoded_bytes="$SCAN_ENCODED_BYTES"
-
-scan_media ".mp3" "ftypM4A"
-mp3_after_count="$SCAN_COUNT"
-mp3_after_bytes="$SCAN_BYTES"
-mp3_after_encoded_count="$SCAN_ENCODED_COUNT"
-mp3_after_encoded_bytes="$SCAN_ENCODED_BYTES"
-
-if ((png_after_count != png_before_count || png_after_encoded_count != png_after_count)); then
-  echo "error: PNG count or AVIF magic validation failed" >&2
-  exit 1
+if is_enabled "$ENABLE_PNG_TRANSCODE"; then
+  echo "Transcoding $png_to_encode_count PNG files with $TRANSCODE_JOBS workers"
+  find "$DOCS_DIR" -type f -iname "*.png" -print0 \
+    | xargs -0 -r -n 1 -P "$TRANSCODE_JOBS" bash -c 'transcode_png "$1"' _
 fi
 
-if ((mp3_after_count != mp3_before_count || mp3_after_encoded_count != mp3_after_count)); then
-  echo "error: MP3 count or M4A magic validation failed" >&2
-  exit 1
+if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+  echo "Transcoding $mp3_to_encode_count MP3 files with $TRANSCODE_JOBS workers"
+  find "$DOCS_DIR" -type f -iname "*.mp3" -print0 \
+    | xargs -0 -r -n 1 -P "$TRANSCODE_JOBS" bash -c 'transcode_mp3 "$1"' _
 fi
 
-png_new_encoded_bytes=$((png_after_bytes - png_already_encoded_bytes))
-mp3_new_encoded_bytes=$((mp3_after_bytes - mp3_already_encoded_bytes))
+png_after_count=0
+png_after_bytes=0
+png_after_encoded_count=0
+png_after_encoded_bytes=0
+mp3_after_count=0
+mp3_after_bytes=0
+mp3_after_encoded_count=0
+mp3_after_encoded_bytes=0
+png_new_encoded_bytes=0
+mp3_new_encoded_bytes=0
+
+if is_enabled "$ENABLE_PNG_TRANSCODE"; then
+  scan_media ".png" "ftypavif"
+  png_after_count="$SCAN_COUNT"
+  png_after_bytes="$SCAN_BYTES"
+  png_after_encoded_count="$SCAN_ENCODED_COUNT"
+  png_after_encoded_bytes="$SCAN_ENCODED_BYTES"
+
+  if ((png_after_count != png_before_count || png_after_encoded_count != png_after_count)); then
+    echo "error: PNG count or AVIF magic validation failed" >&2
+    exit 1
+  fi
+  png_new_encoded_bytes=$((png_after_bytes - png_already_encoded_bytes))
+fi
+
+if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+  scan_media ".mp3" "ftypM4A"
+  mp3_after_count="$SCAN_COUNT"
+  mp3_after_bytes="$SCAN_BYTES"
+  mp3_after_encoded_count="$SCAN_ENCODED_COUNT"
+  mp3_after_encoded_bytes="$SCAN_ENCODED_BYTES"
+
+  if ((mp3_after_count != mp3_before_count || mp3_after_encoded_count != mp3_after_count)); then
+    echo "error: MP3 count or M4A magic validation failed" >&2
+    exit 1
+  fi
+  mp3_new_encoded_bytes=$((mp3_after_bytes - mp3_already_encoded_bytes))
+fi
 
 percentage() {
   local after="$1"
@@ -250,14 +311,14 @@ percentage() {
     'BEGIN { if (before == 0) print "n/a"; else printf "%.2f%%", after * 100 / before }'
 }
 
-if ((png_to_encode_count > 0 && png_new_encoded_bytes * 100 > png_to_encode_bytes * MAX_PERCENT)); then
+if is_enabled "$ENABLE_PNG_TRANSCODE" && ((png_to_encode_count > 0 && png_new_encoded_bytes * 100 > png_to_encode_bytes * MAX_PERCENT)); then
   echo "error: converted AVIF files exceed ${MAX_PERCENT}% of their PNG inputs" \
     "(input=$png_to_encode_bytes bytes, output=$png_new_encoded_bytes bytes," \
     "ratio=$(percentage "$png_new_encoded_bytes" "$png_to_encode_bytes"))" >&2
   exit 1
 fi
 
-if ((mp3_to_encode_count > 0 && mp3_new_encoded_bytes * 100 > mp3_to_encode_bytes * MAX_PERCENT)); then
+if is_enabled "$ENABLE_MP3_TRANSCODE" && ((mp3_to_encode_count > 0 && mp3_new_encoded_bytes * 100 > mp3_to_encode_bytes * MAX_PERCENT)); then
   echo "error: converted M4A files exceed ${MAX_PERCENT}% of their MP3 inputs" \
     "(input=$mp3_to_encode_bytes bytes, output=$mp3_new_encoded_bytes bytes," \
     "ratio=$(percentage "$mp3_new_encoded_bytes" "$mp3_to_encode_bytes"))" >&2
@@ -266,41 +327,65 @@ fi
 
 finished_at="$(date +%s)"
 elapsed_seconds=$((finished_at - started_at))
-avifenc_version_output="$(avifenc --version 2>&1)"
-ffmpeg_version_output="$(ffmpeg -version 2>&1)"
-avifenc_version="${avifenc_version_output%%$'\n'*}"
-ffmpeg_version="${ffmpeg_version_output%%$'\n'*}"
+avifenc_version="n/a"
+ffmpeg_version="n/a"
+if is_enabled "$ENABLE_PNG_TRANSCODE"; then
+  avifenc_version_output="$(avifenc --version 2>&1)"
+  avifenc_version="${avifenc_version_output%%$'\n'*}"
+fi
+if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+  ffmpeg_version_output="$(ffmpeg -version 2>&1)"
+  ffmpeg_version="${ffmpeg_version_output%%$'\n'*}"
+fi
 
-cat >"$REPORT_PATH" <<EOF
-PvZGE in-place media transcode summary
-
-Settings:
-  AVIF color quality: $AVIF_QUALITY
-  AVIF alpha quality: $AVIF_ALPHA_QUALITY
-  AVIF speed: $AVIF_SPEED
-  AAC profile / bitrate: AAC-LC / $AAC_BITRATE
-  Audio channels: mono
-  Audio sample rate: max(16000 Hz, input sample rate / 2)
-  Parallel workers: $TRANSCODE_JOBS
-  Maximum converted/input ratio: $MAX_PERCENT%
-
-PNG -> AVIF (original .png paths retained):
-  Files: $png_before_count
-  Newly converted: $png_to_encode_count
-  Before bytes: $png_before_bytes
-  After bytes: $png_after_bytes
-  After / before: $(percentage "$png_after_bytes" "$png_before_bytes")
-
-MP3 -> M4A/AAC (original .mp3 paths retained):
-  Files: $mp3_before_count
-  Newly converted: $mp3_to_encode_count
-  Before bytes: $mp3_before_bytes
-  After bytes: $mp3_after_bytes
-  After / before: $(percentage "$mp3_after_bytes" "$mp3_before_bytes")
-
-Elapsed seconds: $elapsed_seconds
-avifenc: $avifenc_version
-ffmpeg: $ffmpeg_version
-EOF
+{
+  echo "PvZGE in-place media transcode summary"
+  echo ""
+  echo "Settings:"
+  if is_enabled "$ENABLE_PNG_TRANSCODE"; then
+    echo "  PNG transcode: enabled"
+  else
+    echo "  PNG transcode: disabled"
+  fi
+  if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+    echo "  MP3 transcode: enabled"
+  else
+    echo "  MP3 transcode: disabled"
+  fi
+  echo "  AVIF color quality: $AVIF_QUALITY"
+  echo "  AVIF alpha quality: $AVIF_ALPHA_QUALITY"
+  echo "  AVIF speed: $AVIF_SPEED"
+  echo "  AAC profile / bitrate: AAC-LC / $AAC_BITRATE"
+  echo "  Audio channels: mono"
+  echo "  Audio sample rate: max(16000 Hz, input sample rate / 2)"
+  echo "  Parallel workers: $TRANSCODE_JOBS"
+  echo "  Maximum converted/input ratio: $MAX_PERCENT%"
+  echo ""
+  if is_enabled "$ENABLE_PNG_TRANSCODE"; then
+    echo "PNG -> AVIF (original .png paths retained):"
+    echo "  Files: $png_before_count"
+    echo "  Newly converted: $png_to_encode_count"
+    echo "  Before bytes: $png_before_bytes"
+    echo "  After bytes: $png_after_bytes"
+    echo "  After / before: $(percentage "$png_after_bytes" "$png_before_bytes")"
+  else
+    echo "PNG -> AVIF (original .png paths retained): disabled"
+  fi
+  echo ""
+  if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+    echo "MP3 -> M4A/AAC (original .mp3 paths retained):"
+    echo "  Files: $mp3_before_count"
+    echo "  Newly converted: $mp3_to_encode_count"
+    echo "  Before bytes: $mp3_before_bytes"
+    echo "  After bytes: $mp3_after_bytes"
+    echo "  After / before: $(percentage "$mp3_after_bytes" "$mp3_before_bytes")"
+  else
+    echo "MP3 -> M4A/AAC (original .mp3 paths retained): disabled"
+  fi
+  echo ""
+  echo "Elapsed seconds: $elapsed_seconds"
+  echo "avifenc: $avifenc_version"
+  echo "ffmpeg: $ffmpeg_version"
+} >"$REPORT_PATH"
 
 cat "$REPORT_PATH"
