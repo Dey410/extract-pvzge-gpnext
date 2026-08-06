@@ -5,6 +5,7 @@ from scripts.patch_audio_runtime import PatchError, patch_engine_source, patch_g
 
 DOM_LOADER = (
     'function p9(t){return new Promise((function(e){var i=t.play();return void 0===i?e():i.then(e)}))}'
+    't.load=function(e){return new Promise((function(i,n){t.loadNative(e).then((function(e){i(new t(e))})).catch(n)}))},'
     't.loadNative=function(t){return new Promise((function(e,i){'
     'var n=document.createElement("audio"),r="canplaythrough";'
     'Zs.os===Ys.IOS?r="loadedmetadata":Zs.browserType===Ws.FIREFOX&&(r="canplay");'
@@ -12,7 +13,15 @@ DOM_LOADER = (
     'a=function(){clearTimeout(s),n.removeEventListener(r,o,!1),n.removeEventListener("error",h,!1)},'
     'o=function(){a(),e(n)},h=function(){a(),i(new Error("load audio failure - "+t))};'
     'n.addEventListener(r,o,!1),n.addEventListener("error",h,!1),n.src=t}))},'
-    't.loadOneShotAudio=function(e,i){return 0}'
+    't.loadOneShotAudio=function(e,i){return new Promise((function(n,r){t.loadNative(e).then((function(t){var e=new v9(t,i);n(e)})).catch(r)}))},'
+    't.loadOneShotAudio=function(e,i){return new Promise((function(n,r){t.loadNative(e).then((function(t){var r=new I9(t,i,e);n(r)})).catch(r)}))}'
+)
+
+ENGINE_TAIL = (
+    'e.destroy=function(){bB.off(AB.EVENT_PAUSE,this._onInterruptedBegin,this),'
+    'bB.off(AB.EVENT_RESUME,this._onInterruptedEnd,this),'
+    'this._domAudio.removeEventListener("ended",this._onEnded),this._domAudio=null};'
+    'P9.maxAudioChannel=48;'
 )
 
 DOM_SELECTORS = (
@@ -23,17 +32,36 @@ DOM_SELECTORS = (
 
 
 class PatchEngineSourceTests(unittest.TestCase):
-    def test_defers_dom_audio_src_until_first_play_and_forces_dom_backend(self):
-        patched, changes = patch_engine_source(DOM_LOADER + DOM_SELECTORS)
+    def test_returns_native_facade_and_forces_dom_backend(self):
+        patched, changes = patch_engine_source(
+            DOM_LOADER + DOM_SELECTORS + ENGINE_TAIL
+        )
 
-        self.assertIn('n.preload="none"', patched)
-        self.assertIn("n.__pvzgeLazySrc=t", patched)
+        self.assertIn(
+            "window.__gardendlessNativeAudio.createNativeAudioHandle",
+            patched,
+        )
+        self.assertEqual(patched.count('{role:"oneShot"}'), 2)
+        self.assertIn('n.__pvzgeLazySrc=t', patched)
         self.assertIn("t.src=t.__pvzgeLazySrc", patched)
+        self.assertIn(
+            "this._domAudio&&this._domAudio.release&&this._domAudio.release(),"
+            "this._domAudio=null",
+            patched,
+        )
+        self.assertIn(
+            "window.__gardendlessHostConfig.audioVoicePoolSize||48",
+            patched,
+        )
+        self.assertIn('document.createElement("audio")', patched)
         self.assertNotIn('"canplaythrough"', patched)
         self.assertEqual(patched.count("DOM_AUDIO&&!1?"), 3)
         self.assertEqual(changes["dom_loader"], 1)
         self.assertEqual(changes["play_hook"], 1)
         self.assertEqual(changes["force_dom"], 3)
+        self.assertEqual(changes["oneshot_role"], 2)
+        self.assertEqual(changes["destroy_release"], 1)
+        self.assertEqual(changes["max_channel"], 1)
 
     def test_rejects_unknown_engine_layout(self):
         with self.assertRaises(PatchError):

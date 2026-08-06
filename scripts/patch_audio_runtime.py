@@ -20,6 +20,33 @@ DOM_LOADER_PATTERN = re.compile(
     re.DOTALL,
 )
 
+ONESHOT_ROLE_PATTERN = re.compile(
+    r"(?P<head>[A-Za-z_$][\w$]*\.loadOneShotAudio=function\([^)]*\)"
+    r"\{return new Promise\(\(function\([^)]*\)\{)"
+    r"(?P<body>.*?)"
+    r"(?P<call>[A-Za-z_$][\w$]*\.loadNative\()(?P<arg>[A-Za-z_$][\w$]*)(?P<close>\))",
+    re.DOTALL,
+)
+
+DESTROY_PATTERN = re.compile(
+    r"(?P<prefix>[A-Za-z_$][\w$]*\.destroy=function\(\)\{[^}]*?"
+    r"this\._domAudio\.removeEventListener\(\"ended\",this\._onEnded\),)"
+    r"this\._domAudio=null"
+)
+
+MAX_CHANNEL_PATTERN = re.compile(
+    r"(?P<owner>[A-Za-z_$][\w$]*)\.maxAudioChannel=\d+"
+)
+
+UPGRADE_LOADER_PATTERN = re.compile(
+    r"(?P<head>[A-Za-z_$][\w$]*\.loadNative=function\("
+    r"(?P<url>[A-Za-z_$][\w$]*)\)\{return new Promise\(\(function\("
+    r"(?P<resolve>[A-Za-z_$][\w$]*),(?P<reject>[A-Za-z_$][\w$]*)\)\{)"
+    r"var (?P<audio>[A-Za-z_$][\w$]*)=document\.createElement\(\"audio\"\);"
+    r"(?P=audio)\.preload=\"none\",(?P=audio)\.__pvzgeLazySrc=(?P=url),"
+    r"(?P=resolve)\((?P=audio)\)\}\)\}"
+)
+
 PLAY_HOOK_PATTERN = re.compile(
     r"function (?P<function>[A-Za-z_$][\w$]*)\((?P<audio>[A-Za-z_$][\w$]*)\)"
     r"\{return new Promise\(\(function\((?P<resolve>[A-Za-z_$][\w$]*)\)\{"
@@ -42,14 +69,28 @@ def patch_engine_source(source: str) -> tuple[str, dict[str, int]]:
         resolve = match.group("resolve")
         return (
             match.group("head")
-            + f'var {audio}=document.createElement("audio");'
-            + f'{audio}.preload="none",'
-            + f"{audio}.__pvzgeLazySrc={url},"
+            + f"var {audio}=window.__gardendlessNativeAudio"
+            + "&&window.__gardendlessNativeAudio.createNativeAudioHandle"
+            + f"?window.__gardendlessNativeAudio.createNativeAudioHandle({url},"
+            + '{role:(arguments.length>1&&arguments[1]&&arguments[1].role)||"continuous"})'
+            + f':function(){{var n=document.createElement("audio");'
+            + f'n.preload="none",n.__pvzgeLazySrc={url};return n}}();'
             + f"{resolve}({audio})"
             + "}))}"
         )
 
+    def replace_oneshot(match: re.Match[str]) -> str:
+        return (
+            match.group("head")
+            + match.group("body")
+            + match.group("call")
+            + match.group("arg")
+            + ',{role:"oneShot"}'
+            + match.group("close")
+        )
+
     patched, loader_count = DOM_LOADER_PATTERN.subn(replace_loader, source)
+    patched, oneshot_count = ONESHOT_ROLE_PATTERN.subn(replace_oneshot, patched)
 
     def replace_play_hook(match: re.Match[str]) -> str:
         audio = match.group("audio")
@@ -64,17 +105,39 @@ def patch_engine_source(source: str) -> tuple[str, dict[str, int]]:
     patched, force_dom_count = FORCE_DOM_PATTERN.subn(
         r"!==\1.DOM_AUDIO&&!1?", patched
     )
+    patched, destroy_count = DESTROY_PATTERN.subn(
+        r"\g<prefix>"
+        "this._domAudio&&this._domAudio.release&&this._domAudio.release(),"
+        "this._domAudio=null",
+        patched,
+    )
+    patched, max_channel_count = MAX_CHANNEL_PATTERN.subn(
+        r"\g<owner>.maxAudioChannel=window.__gardendlessHostConfig"
+        "&&window.__gardendlessHostConfig.audioVoicePoolSize||48",
+        patched,
+    )
 
     changes = {
         "dom_loader": loader_count,
         "play_hook": play_hook_count,
         "force_dom": force_dom_count,
+        "oneshot_role": oneshot_count,
+        "destroy_release": destroy_count,
+        "max_channel": max_channel_count,
     }
 
-    if changes != {"dom_loader": 1, "play_hook": 1, "force_dom": 3}:
+    if changes != {
+        "dom_loader": 1,
+        "play_hook": 1,
+        "force_dom": 3,
+        "oneshot_role": 2,
+        "destroy_release": 1,
+        "max_channel": 1,
+    }:
         raise PatchError(
             "unexpected Cocos audio runtime layout: "
-            f"expected dom_loader=1, play_hook=1, force_dom=3; got {changes}"
+            "expected dom_loader=1, play_hook=1, force_dom=3, "
+            f"oneshot_role=2, destroy_release=1, max_channel=1; got {changes}"
         )
 
     return patched, changes
@@ -152,7 +215,7 @@ def patch_docs(docs_dir: Path, report_path: Path) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report = "\n".join(
         [
-            "PvZGE lazy DOM audio runtime patch",
+            "PvZGE native audio facade runtime patch",
             "",
             f"Engine file: {engine_path.relative_to(docs_dir)}",
             f"Engine SHA-256 before: {sha256(engine_before)}",
@@ -160,6 +223,9 @@ def patch_docs(docs_dir: Path, report_path: Path) -> None:
             f"DOM loader replacements: {engine_changes['dom_loader']}",
             f"Play hook replacements: {engine_changes['play_hook']}",
             f"Forced DOM selectors: {engine_changes['force_dom']}",
+            f"One-shot role replacements: {engine_changes['oneshot_role']}",
+            f"Destroy release replacements: {engine_changes['destroy_release']}",
+            f"Max audio channel replacements: {engine_changes['max_channel']}",
             "",
             f"Game file: {game_path.relative_to(docs_dir)}",
             f"Game SHA-256 before: {sha256(game_before)}",
@@ -167,8 +233,12 @@ def patch_docs(docs_dir: Path, report_path: Path) -> None:
             f"DOM audio defaults: {game_changes}",
             "",
             "Behavior:",
-            '  HTMLAudioElement is created with preload="none".',
-            "  Its URL is assigned only immediately before the first play().",
+            "  The DOM loader returns a native audio facade when available.",
+            "  One-shot loads are tagged role=oneShot; AudioSource loads default",
+            "  to role=continuous. A real <audio> element is the fallback when",
+            "  the facade factory is absent (Android/OHOS or old game package).",
+            "  Destroy releases the native voice, and maxAudioChannel is bound",
+            "  to the host audioVoicePoolSize configuration.",
             "  Web Audio selection is disabled so eager PCM decoding cannot occur.",
             "",
         ]
