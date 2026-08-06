@@ -109,7 +109,11 @@ printf 'PADDING' >> "$out"
         write_stub(
             self.bin / "ffprobe",
             """#!/usr/bin/env bash
-printf '44100\\n'
+case "$*" in
+  *"high.mp3"*) printf '48000\\n2\\n320000\\n' ;;
+  *"low.mp3"*) printf '16000\\n1\\n27000\\n' ;;
+  *) printf '44100\\n1\\n128000\\n' ;;
+esac
 """,
         )
 
@@ -153,6 +157,34 @@ printf '44100\\n'
         self.assertIn("PNG transcode: enabled", report)
         self.assertIn("MP3 transcode: enabled", report)
         self.assertIn("Newly converted: 1", report)
+
+    def test_high_quality_grading_preserves_channels_and_bitrate(self):
+        png = self.docs / "sprite.png"
+        png.write_bytes(b"P" * 300)
+        high = self.docs / "high.mp3"
+        high.write_bytes(b"H" * 400)
+        low = self.docs / "low.mp3"
+        low.write_bytes(b"L" * 400)
+
+        result = self.run_script()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (self.logs / "ffmpeg.log").read_text(encoding="utf-8")
+        high_line = next(
+            line for line in log.splitlines() if "high.mp3" in line
+        )
+        low_line = next(
+            line for line in log.splitlines() if "low.mp3" in line
+        )
+        self.assertIn("-ar 44100", high_line)
+        self.assertIn("-ac 2", high_line)
+        self.assertIn("-b:a 128k", high_line)
+        self.assertIn("-ar 16000", low_line)
+        self.assertIn("-ac 1", low_line)
+        self.assertIn("-b:a 24k", low_line)
+        report = self.report.read_text(encoding="utf-8")
+        self.assertIn("AAC high-quality bitrate: 128k", report)
+        self.assertIn("AAC high-quality sample rate: 44100", report)
 
 
 if __name__ == "__main__":

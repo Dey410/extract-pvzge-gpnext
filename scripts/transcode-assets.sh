@@ -9,6 +9,10 @@ AVIF_QUALITY="${AVIF_QUALITY:-60}"
 AVIF_ALPHA_QUALITY="${AVIF_ALPHA_QUALITY:-80}"
 AVIF_SPEED="${AVIF_SPEED:-6}"
 AAC_BITRATE="${AAC_BITRATE:-24k}"
+HIGH_QUALITY_BITRATE="${HIGH_QUALITY_BITRATE:-128k}"
+HIGH_QUALITY_SAMPLE_RATE="${HIGH_QUALITY_SAMPLE_RATE:-44100}"
+HIGH_QUALITY_MIN_SAMPLE_RATE="${HIGH_QUALITY_MIN_SAMPLE_RATE:-32000}"
+HIGH_QUALITY_MIN_BITRATE="${HIGH_QUALITY_MIN_BITRATE:-96000}"
 TRANSCODE_JOBS="${TRANSCODE_JOBS:-$(nproc)}"
 MAX_PERCENT="${MAX_PERCENT:-30}"
 ENABLE_PNG_TRANSCODE="${ENABLE_PNG_TRANSCODE:-1}"
@@ -145,6 +149,8 @@ AVIF_ALPHA_QUANTIZER=13
 export AVIF_QUALITY AVIF_ALPHA_QUALITY AVIF_SPEED
 export AVIFENC_MODERN AVIF_COLOR_QUANTIZER AVIF_ALPHA_QUANTIZER
 export AAC_BITRATE
+export HIGH_QUALITY_BITRATE HIGH_QUALITY_SAMPLE_RATE
+export HIGH_QUALITY_MIN_SAMPLE_RATE HIGH_QUALITY_MIN_BITRATE
 
 transcode_png() {
   local file="$1"
@@ -190,31 +196,49 @@ transcode_png() {
 transcode_mp3() {
   local file="$1"
   local temporary="${file}.transcoding.${BASHPID}.m4a"
-  local input_sample_rate
+  local input_sample_rate=""
+  local input_channels="1"
+  local input_bit_rate="0"
+  local output_bitrate="$AAC_BITRATE"
+  local output_channels=1
   local output_sample_rate
+  local probe_output
 
   if has_magic "$file" "ftypM4A"; then
     return 0
   fi
 
-  if ! input_sample_rate="$(
+  if ! probe_output="$(
     ffprobe \
       -v error \
       -select_streams a:0 \
-      -show_entries stream=sample_rate \
+      -show_entries stream=sample_rate,channels,bit_rate \
       -of default=noprint_wrappers=1:nokey=1 \
       "$file"
   )"; then
-    echo "error: ffprobe could not read the sample rate for $file" >&2
+    echo "error: ffprobe could not read audio properties for $file" >&2
     return 1
   fi
 
+  input_sample_rate="$(printf '%s\n' "$probe_output" | awk 'NR==1 {print}')"
+  input_channels="$(printf '%s\n' "$probe_output" | awk 'NR==2 {print}')"
+  input_bit_rate="$(printf '%s\n' "$probe_output" | awk 'NR==3 {print}')"
+
+  [[ "$input_channels" =~ ^[0-9]+$ ]] || input_channels=1
+  [[ "$input_bit_rate" =~ ^[0-9]+$ ]] || input_bit_rate=0
   if [[ ! "$input_sample_rate" =~ ^[1-9][0-9]*$ ]]; then
     echo "error: invalid sample rate '$input_sample_rate' for $file" >&2
     return 1
   fi
 
-  if ((input_sample_rate > 32000)); then
+  if ((input_sample_rate >= HIGH_QUALITY_MIN_SAMPLE_RATE)) \
+    || ((input_bit_rate >= HIGH_QUALITY_MIN_BITRATE)) \
+    || ((input_channels >= 2)); then
+    output_bitrate="$HIGH_QUALITY_BITRATE"
+    output_channels="$input_channels"
+    ((output_channels > 2)) && output_channels=2
+    output_sample_rate="$HIGH_QUALITY_SAMPLE_RATE"
+  elif ((input_sample_rate > 32000)); then
     output_sample_rate=$((input_sample_rate / 2))
   else
     output_sample_rate=16000
@@ -230,8 +254,8 @@ transcode_mp3() {
     -vn \
     -c:a aac \
     -profile:a aac_low \
-    -b:a "$AAC_BITRATE" \
-    -ac 1 \
+    -b:a "$output_bitrate" \
+    -ac "$output_channels" \
     -ar "$output_sample_rate" \
     -threads 1 \
     -map_metadata -1 \
@@ -356,7 +380,11 @@ fi
   echo "  AVIF alpha quality: $AVIF_ALPHA_QUALITY"
   echo "  AVIF speed: $AVIF_SPEED"
   echo "  AAC profile / bitrate: AAC-LC / $AAC_BITRATE"
-  echo "  Audio channels: mono"
+  echo "  AAC high-quality bitrate: $HIGH_QUALITY_BITRATE"
+  echo "  AAC high-quality sample rate: $HIGH_QUALITY_SAMPLE_RATE"
+  echo "  High-quality threshold: sample rate >= $HIGH_QUALITY_MIN_SAMPLE_RATE Hz"
+  echo "    or bitrate >= $HIGH_QUALITY_MIN_BITRATE bps or stereo"
+  echo "  Audio channels: preserved for high quality, mono for low quality"
   echo "  Audio sample rate: max(16000 Hz, input sample rate / 2)"
   echo "  Parallel workers: $TRANSCODE_JOBS"
   echo "  Maximum converted/input ratio: $MAX_PERCENT%"
