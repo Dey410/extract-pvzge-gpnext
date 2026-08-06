@@ -19,9 +19,9 @@ on:
           - avif
           - astc
       enable_mp3_transcode:
-        description: "启用 MP3→M4A/AAC 原地转码（可与 PNG 转码独立开关）"
+        description: "启用 MP3→M4A/AAC 原地转码"
         required: true
-        default: true
+        default: false
         type: boolean
       enable_audio_lazy_loading:
         description: "构建时修改运行时代码，使音频仅在播放时加载"
