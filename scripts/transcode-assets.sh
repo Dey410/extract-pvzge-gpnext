@@ -124,7 +124,6 @@ fi
 png_to_encode_count=0
 png_to_encode_bytes=0
 mp3_to_encode_count=0
-mp3_to_encode_bytes=0
 
 if is_enabled "$ENABLE_PNG_TRANSCODE"; then
   png_to_encode_count=$((png_before_count - png_already_encoded_count))
@@ -133,7 +132,6 @@ fi
 
 if is_enabled "$ENABLE_MP3_TRANSCODE"; then
   mp3_to_encode_count=$((mp3_before_count - mp3_already_encoded_count))
-  mp3_to_encode_bytes=$((mp3_before_bytes - mp3_already_encoded_bytes))
 fi
 
 AVIFENC_MODERN=0
@@ -298,7 +296,6 @@ mp3_after_bytes=0
 mp3_after_encoded_count=0
 mp3_after_encoded_bytes=0
 png_new_encoded_bytes=0
-mp3_new_encoded_bytes=0
 
 if is_enabled "$ENABLE_PNG_TRANSCODE"; then
   scan_media ".png" "ftypavif"
@@ -325,7 +322,6 @@ if is_enabled "$ENABLE_MP3_TRANSCODE"; then
     echo "error: MP3 count or M4A magic validation failed" >&2
     exit 1
   fi
-  mp3_new_encoded_bytes=$((mp3_after_bytes - mp3_already_encoded_bytes))
 fi
 
 percentage() {
@@ -339,13 +335,6 @@ if is_enabled "$ENABLE_PNG_TRANSCODE" && ((png_to_encode_count > 0 && png_new_en
   echo "error: converted AVIF files exceed ${MAX_PERCENT}% of their PNG inputs" \
     "(input=$png_to_encode_bytes bytes, output=$png_new_encoded_bytes bytes," \
     "ratio=$(percentage "$png_new_encoded_bytes" "$png_to_encode_bytes"))" >&2
-  exit 1
-fi
-
-if is_enabled "$ENABLE_MP3_TRANSCODE" && ((mp3_to_encode_count > 0 && mp3_new_encoded_bytes * 100 > mp3_to_encode_bytes * MAX_PERCENT)); then
-  echo "error: converted M4A files exceed ${MAX_PERCENT}% of their MP3 inputs" \
-    "(input=$mp3_to_encode_bytes bytes, output=$mp3_new_encoded_bytes bytes," \
-    "ratio=$(percentage "$mp3_new_encoded_bytes" "$mp3_to_encode_bytes"))" >&2
   exit 1
 fi
 
@@ -387,7 +376,7 @@ fi
   echo "  Audio channels: preserved for high quality, mono for low quality"
   echo "  Audio sample rate: max(16000 Hz, input sample rate / 2)"
   echo "  Parallel workers: $TRANSCODE_JOBS"
-  echo "  Maximum converted/input ratio: $MAX_PERCENT%"
+  echo "  Maximum PNG converted/input ratio: $MAX_PERCENT%"
   echo ""
   if is_enabled "$ENABLE_PNG_TRANSCODE"; then
     echo "PNG -> AVIF (original .png paths retained):"

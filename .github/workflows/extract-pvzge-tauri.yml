@@ -9,11 +9,15 @@ on:
       asset_name:
         description: "Release 中的 ZIP 或 EXE 文件名（留空则自动选择）"
         required: false
-      enable_compression:
-        description: "启用 PNG→AVIF 原地转码"
+      image_transcode_format:
+        description: "图片转码格式：none=不转码（默认），avif=原地转 AVIF（保留 .png 路径），astc=仅 Cocos native 纹理转 ASTC 并改写元数据"
         required: true
-        default: true
-        type: boolean
+        default: none
+        type: choice
+        options:
+          - none
+          - avif
+          - astc
       enable_mp3_transcode:
         description: "启用 MP3→M4A/AAC 原地转码（可与 PNG 转码独立开关）"
         required: true
@@ -209,30 +213,97 @@ jobs:
             docs \
             reports/audio-runtime-patch.txt
 
-      - name: Install media transcode tools
-        if: ${{ inputs.enable_compression || inputs.enable_mp3_transcode }}
+      - name: Install asset transcode tools
+        if: ${{ inputs.image_transcode_format != 'none' || inputs.enable_mp3_transcode }}
         shell: bash
         run: |
           set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install \
             --yes \
             --no-install-recommends \
-            ffmpeg \
-            libavif-bin
+            ffmpeg
 
-          avifenc --version
+          if [[ "${{ inputs.image_transcode_format }}" == "avif" ]]; then
+            sudo apt-get install \
+              --yes \
+              --no-install-recommends \
+              libavif-bin
+            avifenc --version
+          fi
+
+          if [[ "${{ inputs.image_transcode_format }}" == "astc" ]]; then
+            sudo apt-get install \
+              --yes \
+              --no-install-recommends \
+              curl \
+              python3-pil \
+              unzip
+
+            ASTCENC_VERSION="5.6.0"
+            ASTCENC_ARCHIVE="astcenc-${ASTCENC_VERSION}-linux-x64.zip"
+            ASTCENC_SHA256="4fa262fb4883997b2b38a95c0de3b7ee26d22ac7ab1ebd030558089f2e917502"
+            ASTCENC_URL="https://github.com/ARM-software/astc-encoder/releases/download/${ASTCENC_VERSION}/${ASTCENC_ARCHIVE}"
+            ASTCENC_DOWNLOAD="$RUNNER_TEMP/$ASTCENC_ARCHIVE"
+            ASTCENC_EXTRACT="$RUNNER_TEMP/astcenc-$ASTCENC_VERSION"
+            ASTCENC_BIN_DIR="$RUNNER_TEMP/astcenc-bin"
+
+            curl \
+              --fail \
+              --location \
+              --proto '=https' \
+              --tlsv1.2 \
+              --retry 5 \
+              --retry-all-errors \
+              --output "$ASTCENC_DOWNLOAD" \
+              "$ASTCENC_URL"
+            echo "$ASTCENC_SHA256  $ASTCENC_DOWNLOAD" \
+              | sha256sum --check --strict
+            unzip -q "$ASTCENC_DOWNLOAD" -d "$ASTCENC_EXTRACT"
+
+            CPU_FLAGS=" $(grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2-) "
+            if [[ "$CPU_FLAGS" == *" avx2 "* \
+              && "$CPU_FLAGS" == *" sse4_2 "* \
+              && "$CPU_FLAGS" == *" popcnt "* \
+              && "$CPU_FLAGS" == *" f16c "* ]]; then
+              ASTCENC_VARIANT="avx2"
+            elif [[ "$CPU_FLAGS" == *" sse4_1 "* \
+              && "$CPU_FLAGS" == *" popcnt "* ]]; then
+              ASTCENC_VARIANT="sse4.1"
+            else
+              ASTCENC_VARIANT="sse2"
+            fi
+
+            mkdir -p "$ASTCENC_BIN_DIR"
+            install \
+              -m 0755 \
+              "$ASTCENC_EXTRACT/bin/astcenc-$ASTCENC_VARIANT" \
+              "$ASTCENC_BIN_DIR/astcenc"
+            echo "$ASTCENC_BIN_DIR" >> "$GITHUB_PATH"
+            "$ASTCENC_BIN_DIR/astcenc" -version
+          fi
+
           ffmpeg -version
 
       - name: Transcode assets in place
-        if: ${{ inputs.enable_compression || inputs.enable_mp3_transcode }}
+        if: ${{ inputs.image_transcode_format == 'avif' || inputs.enable_mp3_transcode }}
         shell: bash
         env:
-          ENABLE_PNG_TRANSCODE: ${{ inputs.enable_compression }}
+          ENABLE_PNG_TRANSCODE: ${{ inputs.image_transcode_format == 'avif' }}
           ENABLE_MP3_TRANSCODE: ${{ inputs.enable_mp3_transcode }}
         run: |
           set -euo pipefail
           bash scripts/transcode-assets.sh docs reports/transcode-summary.txt
+
+      - name: Transcode textures to ASTC without fallbacks
+        if: ${{ inputs.image_transcode_format == 'astc' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/transcode_textures_astc.py \
+            docs \
+            reports/astc-texture-summary.txt
 
       - name: Upload extracted assets
         uses: actions/upload-artifact@v4
