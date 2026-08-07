@@ -23,6 +23,13 @@ on:
         required: true
         default: false
         type: boolean
+      audio_transcode_profile:
+        description: "音频转码策略 profile（仅 enable_mp3_transcode=true 时生效）"
+        required: false
+        default: compact-150
+        type: choice
+        options:
+          - compact-150
       enable_audio_lazy_loading:
         description: "构建时修改运行时代码，使音频仅在播放时加载"
         required: true
@@ -292,6 +299,7 @@ jobs:
         env:
           ENABLE_PNG_TRANSCODE: ${{ inputs.image_transcode_format == 'avif' }}
           ENABLE_MP3_TRANSCODE: ${{ inputs.enable_mp3_transcode }}
+          AUDIO_TRANSCODE_PROFILE: ${{ inputs.audio_transcode_profile }}
         run: |
           set -euo pipefail
           bash scripts/transcode-assets.sh docs reports/transcode-summary.txt

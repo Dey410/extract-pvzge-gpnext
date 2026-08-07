@@ -2,21 +2,24 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 DOCS_DIR="${1:-docs}"
 REPORT_PATH="${2:-reports/transcode-summary.txt}"
 
 AVIF_QUALITY="${AVIF_QUALITY:-60}"
 AVIF_ALPHA_QUALITY="${AVIF_ALPHA_QUALITY:-80}"
 AVIF_SPEED="${AVIF_SPEED:-6}"
-AAC_BITRATE="${AAC_BITRATE:-24k}"
-HIGH_QUALITY_BITRATE="${HIGH_QUALITY_BITRATE:-128k}"
-HIGH_QUALITY_SAMPLE_RATE="${HIGH_QUALITY_SAMPLE_RATE:-44100}"
-HIGH_QUALITY_MIN_SAMPLE_RATE="${HIGH_QUALITY_MIN_SAMPLE_RATE:-32000}"
-HIGH_QUALITY_MIN_BITRATE="${HIGH_QUALITY_MIN_BITRATE:-96000}"
 TRANSCODE_JOBS="${TRANSCODE_JOBS:-$(nproc)}"
 MAX_PERCENT="${MAX_PERCENT:-30}"
 ENABLE_PNG_TRANSCODE="${ENABLE_PNG_TRANSCODE:-1}"
-ENABLE_MP3_TRANSCODE="${ENABLE_MP3_TRANSCODE:-1}"
+# Audio transcoding is lossy and irreversible; keep it opt-in.
+ENABLE_MP3_TRANSCODE="${ENABLE_MP3_TRANSCODE:-0}"
+AUDIO_TRANSCODE_PROFILE="${AUDIO_TRANSCODE_PROFILE:-compact-150}"
+AUDIO_MIN_SIZE_SAVING_RATIO="${AUDIO_MIN_SIZE_SAVING_RATIO:-}"
+AUDIO_MIN_EXPECTED_SAVING_RATIO="${AUDIO_MIN_EXPECTED_SAVING_RATIO:-}"
+AUDIO_POLICY_SCRIPT="$SCRIPT_DIR/audio_policy.py"
+AUDIO_WORKER_SCRIPT="$SCRIPT_DIR/audio_transcode_worker.py"
 
 is_enabled() {
   case "$1" in
@@ -35,7 +38,7 @@ if is_enabled "$ENABLE_PNG_TRANSCODE"; then
   required_commands+=(avifenc)
 fi
 if is_enabled "$ENABLE_MP3_TRANSCODE"; then
-  required_commands+=(ffmpeg ffprobe)
+  required_commands+=(ffmpeg ffprobe python3)
 fi
 for command_name in "${required_commands[@]}"; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -54,6 +57,33 @@ if [[ ! "$MAX_PERCENT" =~ ^[1-9][0-9]*$ ]] || ((MAX_PERCENT > 100)); then
   exit 1
 fi
 
+if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+  if [[ "$AUDIO_TRANSCODE_PROFILE" != "compact-150" ]]; then
+    echo "error: unsupported audio transcode profile: $AUDIO_TRANSCODE_PROFILE" >&2
+    exit 1
+  fi
+  if [[ -z "$AUDIO_MIN_SIZE_SAVING_RATIO" ]]; then
+    AUDIO_MIN_SIZE_SAVING_RATIO="$(
+      python3 "$AUDIO_POLICY_SCRIPT" config min_size_saving_ratio
+    )"
+  fi
+  if [[ -z "$AUDIO_MIN_EXPECTED_SAVING_RATIO" ]]; then
+    AUDIO_MIN_EXPECTED_SAVING_RATIO="$(
+      python3 "$AUDIO_POLICY_SCRIPT" config min_expected_saving_ratio
+    )"
+  fi
+  if ! awk -v ratio="$AUDIO_MIN_SIZE_SAVING_RATIO" \
+    'BEGIN { exit !(ratio + 0 > 0 && ratio + 0 < 1) }'; then
+    echo "error: AUDIO_MIN_SIZE_SAVING_RATIO must be between 0 and 1" >&2
+    exit 1
+  fi
+  if ! awk -v ratio="$AUDIO_MIN_EXPECTED_SAVING_RATIO" \
+    'BEGIN { exit !(ratio + 0 > 0 && ratio + 0 < 1) }'; then
+    echo "error: AUDIO_MIN_EXPECTED_SAVING_RATIO must be between 0 and 1" >&2
+    exit 1
+  fi
+fi
+
 mkdir -p "$(dirname -- "$REPORT_PATH")"
 started_at="$(date +%s)"
 
@@ -61,6 +91,46 @@ has_magic() {
   local file="$1"
   local magic="$2"
   LC_ALL=C head -c 32 -- "$file" | grep -aFq -- "$magic"
+}
+
+has_mp3_magic() {
+  local file="$1"
+  local hex
+  hex="$(LC_ALL=C od -An -tx1 -N3 "$file" 2>/dev/null | tr -d ' \n')"
+  case "$hex" in
+    494433*) return 0 ;;  # ID3 tag
+    ff[ef]*) return 0 ;;  # MPEG audio frame sync
+    *) return 1 ;;
+  esac
+}
+
+scan_mp3_after() {
+  local file
+  local size
+
+  mp3_after_count=0
+  mp3_after_bytes=0
+  mp3_after_m4a_count=0
+  mp3_after_m4a_bytes=0
+  mp3_after_mp3_count=0
+  mp3_after_mp3_bytes=0
+  mp3_after_invalid_count=0
+
+  while IFS= read -r -d '' file; do
+    size="$(stat -c '%s' -- "$file")"
+    ((mp3_after_count += 1))
+    ((mp3_after_bytes += size))
+
+    if has_magic "$file" "ftypM4A"; then
+      ((mp3_after_m4a_count += 1))
+      ((mp3_after_m4a_bytes += size))
+    elif has_mp3_magic "$file"; then
+      ((mp3_after_mp3_count += 1))
+      ((mp3_after_mp3_bytes += size))
+    else
+      ((mp3_after_invalid_count += 1))
+    fi
+  done < <(find "$DOCS_DIR" -type f -iname "*.mp3" -print0)
 }
 
 scan_media() {
@@ -146,9 +216,15 @@ AVIF_ALPHA_QUANTIZER=13
 
 export AVIF_QUALITY AVIF_ALPHA_QUALITY AVIF_SPEED
 export AVIFENC_MODERN AVIF_COLOR_QUANTIZER AVIF_ALPHA_QUANTIZER
-export AAC_BITRATE
-export HIGH_QUALITY_BITRATE HIGH_QUALITY_SAMPLE_RATE
-export HIGH_QUALITY_MIN_SAMPLE_RATE HIGH_QUALITY_MIN_BITRATE
+
+if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+  AUDIO_DECISIONS_LOG="${REPORT_PATH}.audio-decisions.log"
+  AUDIO_BITRATE_LOG="${REPORT_PATH}.audio-bitrate-distribution.log"
+  : > "$AUDIO_DECISIONS_LOG"
+  : > "$AUDIO_BITRATE_LOG"
+  export AUDIO_WORKER_SCRIPT AUDIO_DECISIONS_LOG AUDIO_TRANSCODE_PROFILE
+  export AUDIO_MIN_SIZE_SAVING_RATIO AUDIO_MIN_EXPECTED_SAVING_RATIO
+fi
 
 transcode_png() {
   local file="$1"
@@ -193,84 +269,12 @@ transcode_png() {
 
 transcode_mp3() {
   local file="$1"
-  local temporary="${file}.transcoding.${BASHPID}.m4a"
-  local input_sample_rate=""
-  local input_channels="1"
-  local input_bit_rate="0"
-  local output_bitrate="$AAC_BITRATE"
-  local output_channels=1
-  local output_sample_rate
-  local probe_output
-
-  if has_magic "$file" "ftypM4A"; then
-    return 0
-  fi
-
-  if ! probe_output="$(
-    ffprobe \
-      -v error \
-      -select_streams a:0 \
-      -show_entries stream=sample_rate,channels,bit_rate \
-      -of default=noprint_wrappers=1:nokey=1 \
-      "$file"
-  )"; then
-    echo "error: ffprobe could not read audio properties for $file" >&2
-    return 1
-  fi
-
-  input_sample_rate="$(printf '%s\n' "$probe_output" | awk 'NR==1 {print}')"
-  input_channels="$(printf '%s\n' "$probe_output" | awk 'NR==2 {print}')"
-  input_bit_rate="$(printf '%s\n' "$probe_output" | awk 'NR==3 {print}')"
-
-  [[ "$input_channels" =~ ^[0-9]+$ ]] || input_channels=1
-  [[ "$input_bit_rate" =~ ^[0-9]+$ ]] || input_bit_rate=0
-  if [[ ! "$input_sample_rate" =~ ^[1-9][0-9]*$ ]]; then
-    echo "error: invalid sample rate '$input_sample_rate' for $file" >&2
-    return 1
-  fi
-
-  if ((input_sample_rate >= HIGH_QUALITY_MIN_SAMPLE_RATE)) \
-    || ((input_bit_rate >= HIGH_QUALITY_MIN_BITRATE)) \
-    || ((input_channels >= 2)); then
-    output_bitrate="$HIGH_QUALITY_BITRATE"
-    output_channels="$input_channels"
-    ((output_channels > 2)) && output_channels=2
-    output_sample_rate="$HIGH_QUALITY_SAMPLE_RATE"
-  elif ((input_sample_rate > 32000)); then
-    output_sample_rate=$((input_sample_rate / 2))
-  else
-    output_sample_rate=16000
-  fi
-
-  if ! ffmpeg \
-    -nostdin \
-    -hide_banner \
-    -loglevel error \
-    -y \
-    -i "$file" \
-    -map 0:a:0 \
-    -vn \
-    -c:a aac \
-    -profile:a aac_low \
-    -b:a "$output_bitrate" \
-    -ac "$output_channels" \
-    -ar "$output_sample_rate" \
-    -threads 1 \
-    -map_metadata -1 \
-    -movflags +faststart \
-    -f ipod \
-    "$temporary"; then
-    rm -f -- "$temporary"
-    return 1
-  fi
-
-  if [[ ! -s "$temporary" ]] || ! has_magic "$temporary" "ftypM4A"; then
-    echo "error: ffmpeg produced an invalid file for $file" >&2
-    rm -f -- "$temporary"
-    return 1
-  fi
-
-  mv -f -- "$temporary" "$file"
+  python3 "$AUDIO_WORKER_SCRIPT" \
+    --file "$file" \
+    --decisions-log "$AUDIO_DECISIONS_LOG" \
+    --profile "$AUDIO_TRANSCODE_PROFILE" \
+    --min-size-saving-ratio "$AUDIO_MIN_SIZE_SAVING_RATIO" \
+    --min-expected-saving-ratio "$AUDIO_MIN_EXPECTED_SAVING_RATIO"
 }
 
 export -f has_magic transcode_png transcode_mp3
@@ -282,7 +286,7 @@ if is_enabled "$ENABLE_PNG_TRANSCODE"; then
 fi
 
 if is_enabled "$ENABLE_MP3_TRANSCODE"; then
-  echo "Transcoding $mp3_to_encode_count MP3 files with $TRANSCODE_JOBS workers"
+  echo "Applying audio profile $AUDIO_TRANSCODE_PROFILE to $mp3_to_encode_count MP3 files with $TRANSCODE_JOBS workers"
   find "$DOCS_DIR" -type f -iname "*.mp3" -print0 \
     | xargs -0 -r -n 1 -P "$TRANSCODE_JOBS" bash -c 'transcode_mp3 "$1"' _
 fi
@@ -293,8 +297,11 @@ png_after_encoded_count=0
 png_after_encoded_bytes=0
 mp3_after_count=0
 mp3_after_bytes=0
-mp3_after_encoded_count=0
-mp3_after_encoded_bytes=0
+mp3_after_m4a_count=0
+mp3_after_m4a_bytes=0
+mp3_after_mp3_count=0
+mp3_after_mp3_bytes=0
+mp3_after_invalid_count=0
 png_new_encoded_bytes=0
 
 if is_enabled "$ENABLE_PNG_TRANSCODE"; then
@@ -312,14 +319,18 @@ if is_enabled "$ENABLE_PNG_TRANSCODE"; then
 fi
 
 if is_enabled "$ENABLE_MP3_TRANSCODE"; then
-  scan_media ".mp3" "ftypM4A"
-  mp3_after_count="$SCAN_COUNT"
-  mp3_after_bytes="$SCAN_BYTES"
-  mp3_after_encoded_count="$SCAN_ENCODED_COUNT"
-  mp3_after_encoded_bytes="$SCAN_ENCODED_BYTES"
+  scan_mp3_after
 
-  if ((mp3_after_count != mp3_before_count || mp3_after_encoded_count != mp3_after_count)); then
-    echo "error: MP3 count or M4A magic validation failed" >&2
+  if ((mp3_after_count != mp3_before_count)); then
+    echo "error: MP3 file count changed during transcode" >&2
+    exit 1
+  fi
+  if ((mp3_after_invalid_count != 0)); then
+    echo "error: MP3 files are neither MP3 nor M4A/AAC" >&2
+    exit 1
+  fi
+  if ((mp3_after_m4a_count + mp3_after_mp3_count != mp3_after_count)); then
+    echo "error: MP3/AAC final validation failed" >&2
     exit 1
   fi
 fi
@@ -336,6 +347,78 @@ if is_enabled "$ENABLE_PNG_TRANSCODE" && ((png_to_encode_count > 0 && png_new_en
     "(input=$png_to_encode_bytes bytes, output=$png_new_encoded_bytes bytes," \
     "ratio=$(percentage "$png_new_encoded_bytes" "$png_to_encode_bytes"))" >&2
   exit 1
+fi
+
+mp3_decision_total=0
+mp3_decision_duration=0
+mp3_already_aac_count=0
+mp3_keep_gte_count=0
+mp3_keep_expected_count=0
+mp3_transcoded_count=0
+mp3_rejected_count=0
+mp3_unreadable_count=0
+mp3_accepted_bytes=0
+
+if is_enabled "$ENABLE_MP3_TRANSCODE"; then
+  read -r \
+    mp3_decision_total \
+    mp3_decision_duration \
+    mp3_already_aac_count \
+    mp3_keep_gte_count \
+    mp3_keep_expected_count \
+    mp3_transcoded_count \
+    mp3_rejected_count \
+    mp3_unreadable_count \
+    mp3_accepted_bytes <<<"$(
+      awk -F '\t' '
+        {
+          if ($6 != "-") total_duration += $6
+          if ($1 == "transcode") {
+            transcoded++
+            if ($4 != "-") {
+              bitrate_count[$4]++
+              bitrate_duration[$4] += ($6 != "-" ? $6 : 0)
+              accepted_bytes += $5
+            }
+          } else if ($1 == "already_aac") {
+            already_aac++
+          } else if ($1 == "keep") {
+            if ($2 == "target_bitrate_gte_source") keep_gte++
+            else if ($2 == "expected_saving_too_small") keep_expected++
+            else if ($2 == "rejected_after_size_compare") rejected++
+          } else if ($1 == "unreadable") {
+            unreadable++
+          }
+        }
+        END {
+          printf "%d %.6f %d %d %d %d %d %d %d\n",
+            NR, total_duration, already_aac, keep_gte, keep_expected,
+            transcoded, rejected, unreadable, accepted_bytes
+        }
+      ' "$AUDIO_DECISIONS_LOG"
+    )"
+
+  if ((mp3_decision_total != mp3_before_count)); then
+    echo "error: audio decision log is incomplete" >&2
+    exit 1
+  fi
+  if ((mp3_accepted_bytes != mp3_after_m4a_bytes - mp3_already_encoded_bytes)); then
+    echo "error: accepted AAC byte accounting mismatch" >&2
+    exit 1
+  fi
+
+  awk -F '\t' '
+    $1 == "transcode" && $4 != "-" {
+      bitrate = $4
+      count[bitrate]++
+      duration[bitrate] += ($6 != "-" ? $6 : 0)
+    }
+    END {
+      for (bitrate in count) {
+        printf "%d %d %.6f\n", bitrate / 1000, count[bitrate], duration[bitrate]
+      }
+    }
+  ' "$AUDIO_DECISIONS_LOG" | sort -n > "$AUDIO_BITRATE_LOG"
 fi
 
 finished_at="$(date +%s)"
@@ -362,19 +445,24 @@ fi
   fi
   if is_enabled "$ENABLE_MP3_TRANSCODE"; then
     echo "  MP3 transcode: enabled"
+    echo "  Audio transcode profile: $AUDIO_TRANSCODE_PROFILE"
+    echo "  AAC codec/profile: AAC-LC (native ffmpeg)"
+    echo "  Minimum size saving threshold: $(awk -v r="$AUDIO_MIN_SIZE_SAVING_RATIO" 'BEGIN { printf "%.0f%%", r * 100 }')"
+    echo "  Minimum expected saving threshold: $(awk -v r="$AUDIO_MIN_EXPECTED_SAVING_RATIO" 'BEGIN { printf "%.0f%%", r * 100 }')"
+    echo "  Sample rate policy: preserve input sample rate, no upsampling"
+    echo "  Channel policy: preserve input channels, max 2"
   else
     echo "  MP3 transcode: disabled"
+    echo "  Audio transcode profile: $AUDIO_TRANSCODE_PROFILE (unused)"
+    echo "  AAC codec/profile: AAC-LC (unused)"
+    echo "  Minimum size saving threshold: n/a"
+    echo "  Minimum expected saving threshold: n/a"
+    echo "  Sample rate policy: preserve input sample rate (unused)"
+    echo "  Channel policy: preserve input channels, max 2 (unused)"
   fi
   echo "  AVIF color quality: $AVIF_QUALITY"
   echo "  AVIF alpha quality: $AVIF_ALPHA_QUALITY"
   echo "  AVIF speed: $AVIF_SPEED"
-  echo "  AAC profile / bitrate: AAC-LC / $AAC_BITRATE"
-  echo "  AAC high-quality bitrate: $HIGH_QUALITY_BITRATE"
-  echo "  AAC high-quality sample rate: $HIGH_QUALITY_SAMPLE_RATE"
-  echo "  High-quality threshold: sample rate >= $HIGH_QUALITY_MIN_SAMPLE_RATE Hz"
-  echo "    or bitrate >= $HIGH_QUALITY_MIN_BITRATE bps or stereo"
-  echo "  Audio channels: preserved for high quality, mono for low quality"
-  echo "  Audio sample rate: max(16000 Hz, input sample rate / 2)"
   echo "  Parallel workers: $TRANSCODE_JOBS"
   echo "  Maximum PNG converted/input ratio: $MAX_PERCENT%"
   echo ""
@@ -391,11 +479,44 @@ fi
   echo ""
   if is_enabled "$ENABLE_MP3_TRANSCODE"; then
     echo "MP3 -> M4A/AAC (original .mp3 paths retained):"
-    echo "  Files: $mp3_before_count"
-    echo "  Newly converted: $mp3_to_encode_count"
+    echo "  Before files: $mp3_before_count"
     echo "  Before bytes: $mp3_before_bytes"
-    echo "  After bytes: $mp3_after_bytes"
+    echo "  Already AAC before: $mp3_already_encoded_count"
+    echo ""
+    echo "Decisions:"
+    echo "  Already AAC (no re-encode): $mp3_already_aac_count"
+    echo "  Kept MP3 (target bitrate >= source): $mp3_keep_gte_count"
+    echo "  Kept MP3 (expected saving too small): $mp3_keep_expected_count"
+    echo "  Transcoded: $mp3_transcoded_count"
+    echo "  Rejected after actual size comparison: $mp3_rejected_count"
+    echo "  Kept MP3 (unreadable analysis, safe keep): $mp3_unreadable_count"
+    echo ""
+    echo "Target bitrate distribution (accepted transcodes):"
+    if [[ -s "$AUDIO_BITRATE_LOG" ]]; then
+      while read -r kbps count duration_sum; do
+        printf '  %sk: %s files / %.1f s\n' "$kbps" "$count" "$duration_sum"
+      done < "$AUDIO_BITRATE_LOG"
+    else
+      echo "  (none)"
+    fi
+    echo ""
+    echo "Result:"
+    echo "  Final MP3 count: $mp3_after_mp3_count"
+    echo "  Final AAC/M4A count: $mp3_after_m4a_count"
+    echo "  MP3 bytes: $mp3_after_mp3_bytes"
+    echo "  AAC bytes: $mp3_after_m4a_bytes"
+    echo "  Total bytes: $mp3_after_bytes"
+    echo "  Saved bytes: $((mp3_before_bytes - mp3_after_bytes))"
     echo "  After / before: $(percentage "$mp3_after_bytes" "$mp3_before_bytes")"
+    if awk -v d="$mp3_decision_duration" 'BEGIN { exit !(d > 0) }'; then
+      estimated_kbps="$(
+        awk -v bytes="$mp3_after_bytes" -v duration="$mp3_decision_duration" \
+          'BEGIN { printf "%.1f", bytes * 8 / duration / 1000 }'
+      )"
+      echo "  Estimated average bitrate: ${estimated_kbps} kbps"
+    else
+      echo "  Estimated average bitrate: n/a"
+    fi
   else
     echo "MP3 -> M4A/AAC (original .mp3 paths retained): disabled"
   fi
