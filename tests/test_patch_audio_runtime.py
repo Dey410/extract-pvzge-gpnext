@@ -1,6 +1,16 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
 
-from scripts.patch_audio_runtime import PatchError, patch_engine_source, patch_game_source
+from scripts.patch_audio_runtime import (
+    PatchError,
+    classify_audio_files,
+    patch_docs,
+    patch_engine_source,
+    probe_audio_duration,
+    require_ffprobe,
+)
 
 
 DOM_LOADER = (
@@ -21,40 +31,142 @@ DOM_SELECTORS = (
     '(null==i?void 0:i.audioLoadMode)!==s9.DOM_AUDIO&&E9.support?D9.loadOneShotAudio(t,e):y9.loadOneShotAudio(t,e)'
 )
 
+GAME_SOURCE = (
+    'System.register("chunks:///_virtual/SoundRescourses.ts",[],function(){});'
+    "yn.loadmode=r.AudioType.WEB_AUDIO;"
+)
+
 
 class PatchEngineSourceTests(unittest.TestCase):
-    def test_defers_dom_audio_src_until_first_play_and_forces_dom_backend(self):
-        patched, changes = patch_engine_source(DOM_LOADER + DOM_SELECTORS)
+    def test_keeps_lazy_dom_loader_and_routes_only_listed_paths_to_dom(self):
+        patched, changes = patch_engine_source(
+            DOM_LOADER + DOM_SELECTORS,
+            ["assets/resources/native/ab/long-track.mp3"],
+        )
 
         self.assertIn('n.preload="none"', patched)
         self.assertIn("n.__pvzgeLazySrc=t", patched)
         self.assertIn("t.src=t.__pvzgeLazySrc", patched)
         self.assertNotIn('"canplaythrough"', patched)
-        self.assertEqual(patched.count("DOM_AUDIO&&!1?"), 3)
-        self.assertEqual(changes["dom_loader"], 1)
-        self.assertEqual(changes["play_hook"], 1)
-        self.assertEqual(changes["force_dom"], 3)
+        self.assertIn('"assets/resources/native/ab/long-track.mp3"', patched)
+        self.assertIn("new URL(t,document.baseURI).pathname", patched)
+        self.assertEqual(patched.count("E9.support&&!__pvzgeUseDomAudio(e)?"), 1)
+        self.assertEqual(patched.count("E9.support&&!__pvzgeUseDomAudio(t)?"), 2)
+        self.assertNotIn("audioLoadMode)!==", patched)
+        self.assertNotIn("DOM_AUDIO&&!1?", patched)
+        self.assertEqual(
+            changes,
+            {"dom_loader": 1, "play_hook": 1, "hybrid_selector": 3},
+        )
 
     def test_rejects_unknown_engine_layout(self):
         with self.assertRaises(PatchError):
-            patch_engine_source("unrelated JavaScript")
+            patch_engine_source("unrelated JavaScript", [])
 
 
-class PatchGameSourceTests(unittest.TestCase):
-    def test_changes_sound_resources_default_to_dom_audio(self):
-        source = (
-            'System.register("chunks:///_virtual/SoundRescourses.ts",[],function(){});'
-            "yn.loadmode=r.AudioType.WEB_AUDIO;"
+class AudioClassificationTests(unittest.TestCase):
+    def test_uses_dom_at_ten_seconds_and_web_audio_below_ten_seconds(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            docs_dir = Path(temporary_directory)
+            short_path = docs_dir / "assets" / "short.mp3"
+            boundary_path = docs_dir / "assets" / "boundary.ogg"
+            failed_path = docs_dir / "assets" / "unknown.wav"
+            ignored_path = docs_dir / "assets" / "texture.png"
+            for path in (short_path, boundary_path, failed_path, ignored_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+
+            def probe_duration(path: Path) -> float:
+                if path == short_path:
+                    return 9.999
+                if path == boundary_path:
+                    return 10.0
+                raise RuntimeError("unsupported stream")
+
+            decisions = classify_audio_files(docs_dir, 10.0, probe_duration)
+
+        self.assertEqual(
+            [(item.relative_path, item.backend) for item in decisions],
+            [
+                ("assets/boundary.ogg", "DOM_AUDIO"),
+                ("assets/short.mp3", "WEB_AUDIO"),
+                ("assets/unknown.wav", "DOM_AUDIO"),
+            ],
         )
+        self.assertEqual(decisions[0].duration_seconds, 10.0)
+        self.assertEqual(decisions[1].duration_seconds, 9.999)
+        self.assertIsNone(decisions[2].duration_seconds)
+        self.assertEqual(decisions[2].error, "unsupported stream")
 
-        patched, changes = patch_game_source(source)
+    def test_requires_ffprobe_before_classification(self):
+        with self.assertRaisesRegex(PatchError, "ffprobe"):
+            require_ffprobe(lambda command: None)
 
-        self.assertIn("yn.loadmode=r.AudioType.DOM_AUDIO", patched)
-        self.assertEqual(changes, 1)
+    def test_reads_a_finite_duration_from_ffprobe(self):
+        with patch("scripts.patch_audio_runtime.subprocess.run") as run:
+            run.return_value = Mock(returncode=0, stdout="10.250000\n", stderr="")
 
-    def test_rejects_missing_sound_resources_default(self):
-        with self.assertRaises(PatchError):
-            patch_game_source("unrelated JavaScript")
+            duration = probe_audio_duration("/usr/bin/ffprobe", Path("audio.mp3"))
+
+        self.assertEqual(duration, 10.25)
+
+    def test_rejects_an_invalid_ffprobe_duration(self):
+        with patch("scripts.patch_audio_runtime.subprocess.run") as run:
+            run.return_value = Mock(returncode=0, stdout="N/A\n", stderr="")
+
+            with self.assertRaisesRegex(RuntimeError, "invalid duration"):
+                probe_audio_duration("/usr/bin/ffprobe", Path("audio.mp3"))
+
+
+class PatchDocsTests(unittest.TestCase):
+    def test_patches_only_the_engine_and_reports_every_audio_decision(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            docs_dir = root / "docs"
+            engine_path = docs_dir / "cocos-js" / "_virtual_cc-test.js"
+            game_path = docs_dir / "assets" / "main" / "index.js"
+            short_path = docs_dir / "assets" / "resources" / "native" / "short.mp3"
+            long_path = docs_dir / "assets" / "resources" / "native" / "long.mp3"
+            failed_path = docs_dir / "assets" / "resources" / "native" / "failed.mp3"
+            report_path = root / "reports" / "audio-runtime-patch.txt"
+
+            engine_path.parent.mkdir(parents=True)
+            game_path.parent.mkdir(parents=True)
+            short_path.parent.mkdir(parents=True)
+            engine_path.write_text(DOM_LOADER + DOM_SELECTORS, encoding="utf-8")
+            game_path.write_text(GAME_SOURCE, encoding="utf-8")
+            short_path.touch()
+            long_path.touch()
+            failed_path.touch()
+            game_before = game_path.read_bytes()
+
+            def probe_duration(_ffprobe_path: str, path: Path) -> float:
+                if path == short_path:
+                    return 2.5
+                if path == long_path:
+                    return 30.0
+                raise RuntimeError("cannot read duration")
+
+            patch_docs(
+                docs_dir,
+                report_path,
+                ffprobe_path="/fake/ffprobe",
+                duration_probe=probe_duration,
+            )
+
+            patched_engine = engine_path.read_text(encoding="utf-8")
+            game_after = game_path.read_bytes()
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertEqual(game_after, game_before)
+        self.assertNotIn("short.mp3", patched_engine)
+        self.assertIn("long.mp3", patched_engine)
+        self.assertIn("failed.mp3", patched_engine)
+        self.assertIn("Threshold seconds: 10.000", report)
+        self.assertIn("WEB_AUDIO | 2.500 | assets/resources/native/short.mp3", report)
+        self.assertIn("DOM_AUDIO | 30.000 | assets/resources/native/long.mp3", report)
+        self.assertIn("DOM_AUDIO | unknown | assets/resources/native/failed.mp3", report)
+        self.assertIn("cannot read duration", report)
 
 
 if __name__ == "__main__":

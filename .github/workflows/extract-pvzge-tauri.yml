@@ -7,8 +7,8 @@ on:
         description: "Gzh0821/pvzg_site 的 Release 标签（留空则使用最新非草稿 Release，包含 Pre-release）"
         required: false
 
-      enable_audio_lazy_loading:
-        description: "构建时修改运行时代码，使音频仅在播放时加载"
+      enable_hybrid_audio_loading:
+        description: "按时长选择音频后端：长音频懒加载 DOM，短音频使用 Web Audio"
         required: true
         default: true
         type: boolean
@@ -329,13 +329,13 @@ jobs:
           echo "$INDEX_HTML"
 
       # ============================================================
-      # 音频懒加载
+      # 混合音频加载
       #
       # 不进行任何音频转码或压缩
       # ============================================================
 
-      - name: Patch runtime for lazy DOM audio loading
-        if: ${{ inputs.enable_audio_lazy_loading }}
+      - name: Patch runtime for hybrid audio loading
+        if: ${{ inputs.enable_hybrid_audio_loading }}
         shell: bash
         run: |
           set -euo pipefail
