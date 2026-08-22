@@ -1,4 +1,4 @@
-name: Extract PvZGE Tauri Assets
+name: Extract PvZGE Lite Tauri Assets
 
 on:
   workflow_dispatch:
@@ -6,14 +6,7 @@ on:
       release_tag:
         description: "Gzh0821/pvzg_site 的 Release 标签（留空则使用最新版）"
         required: false
-      asset_name:
-        description: "Release 中的 ZIP 或 EXE 文件名（留空则自动选择）"
-        required: false
-      enable_compression:
-        description: "启用 PNG→AVIF 和 MP3→M4A/AAC 原地转码"
-        required: true
-        default: true
-        type: boolean
+
       enable_audio_lazy_loading:
         description: "构建时修改运行时代码，使音频仅在播放时加载"
         required: true
@@ -28,139 +21,237 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
+    env:
+      TAURI_DUMPER_VERSION: "0.2.2"
+
     steps:
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # ------------------------------------------------------------
+      # 获取 pvzge-lite-*.zip
+      # ------------------------------------------------------------
 
-      - name: Download and unpack PvZGE EXE
+      - name: Download and unpack PvZGE Lite
         id: download
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
-          REQUESTED_ASSET_NAME: ${{ inputs.asset_name }}
         run: |
           set -euo pipefail
 
-          mkdir -p input
+          REPO="Gzh0821/pvzg_site"
+
+          mkdir -p input reports
 
           RELEASE_TAG="$REQUESTED_RELEASE_TAG"
+
+          # 未指定 Release 标签时使用 Latest Release
           if [[ -z "$RELEASE_TAG" ]]; then
             RELEASE_TAG="$(
-              gh release list \
-                --repo Gzh0821/pvzg_site \
-                --exclude-drafts \
-                --limit 1 \
+              gh release view \
+                --repo "$REPO" \
                 --json tagName \
-                --jq '.[0].tagName'
+                --jq '.tagName'
             )"
-
-            if [[ -z "$RELEASE_TAG" ]]; then
-              echo "::error::Gzh0821/pvzg_site 没有可用的非草稿 Release"
-              exit 1
-            fi
           fi
 
-          ASSET_NAME="$REQUESTED_ASSET_NAME"
-          if [[ -z "$ASSET_NAME" ]]; then
-            mapfile -t ASSET_CANDIDATES < <(
-              gh release view "$RELEASE_TAG" \
-                --repo Gzh0821/pvzg_site \
-                --json assets \
-                --jq '.assets[].name' \
-                | grep -Ei '\.(zip|exe)$'
-            )
-
-            if [[ "${#ASSET_CANDIDATES[@]}" -ne 1 ]]; then
-              echo "::error::Release $RELEASE_TAG 必须恰好包含一个 ZIP 或 EXE，实际找到 ${#ASSET_CANDIDATES[@]} 个"
-              printf '%s\n' "${ASSET_CANDIDATES[@]}"
-              exit 1
-            fi
-
-            ASSET_NAME="${ASSET_CANDIDATES[0]}"
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "::error::$REPO 没有可用的 Release"
+            exit 1
           fi
 
-          echo "Using release $RELEASE_TAG asset $ASSET_NAME"
+          echo "===== Release ====="
+          echo "$RELEASE_TAG"
 
+          # 获取 Release 中全部资源文件
+          RELEASE_JSON="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$REPO" \
+              --json assets
+          )"
+
+          echo "===== Release assets ====="
+          jq -r '.assets[].name' <<< "$RELEASE_JSON"
+
+          # 只选择：
+          #
+          # pvzge-lite-*.zip
+          #
+          # 例如：
+          # pvzge-lite-0.13.0.zip
+          mapfile -t ASSET_CANDIDATES < <(
+            jq -r '.assets[].name' <<< "$RELEASE_JSON" \
+              | grep -Ei '^pvzge-lite-.+\.zip$' \
+              || true
+          )
+
+          if [[ "${#ASSET_CANDIDATES[@]}" -eq 0 ]]; then
+            echo "::error::Release $RELEASE_TAG 中没有找到 pvzge-lite-*.zip"
+            exit 1
+          fi
+
+          if [[ "${#ASSET_CANDIDATES[@]}" -ne 1 ]]; then
+            echo "::error::Release $RELEASE_TAG 中找到多个 pvzge-lite-*.zip，无法确定使用哪一个"
+            echo "===== Candidates ====="
+            printf '%s\n' "${ASSET_CANDIDATES[@]}"
+            exit 1
+          fi
+
+          ASSET_NAME="${ASSET_CANDIDATES[0]}"
+          DOWNLOAD="input/$ASSET_NAME"
+
+          echo "===== Selected asset ====="
+          echo "$ASSET_NAME"
+
+          # 下载指定 ZIP
           gh release download "$RELEASE_TAG" \
-            --repo Gzh0821/pvzg_site \
+            --repo "$REPO" \
             --pattern "$ASSET_NAME" \
             --dir input
 
-          DOWNLOAD="input/$ASSET_NAME"
-
           if [[ ! -s "$DOWNLOAD" ]]; then
-            echo "::error::没有下载到 $DOWNLOAD"
+            echo "::error::没有下载到有效文件：$DOWNLOAD"
             exit 1
           fi
 
-          case "$ASSET_NAME" in
-            *.zip)
-              mapfile -t EXE_ENTRIES < <(
-                unzip -Z1 "$DOWNLOAD" | grep -Ei '\.exe$'
-              )
+          echo "===== Downloaded file ====="
+          ls -lh "$DOWNLOAD"
 
-              if [[ "${#EXE_ENTRIES[@]}" -ne 1 ]]; then
-                echo "::error::$DOWNLOAD 必须恰好包含一个 EXE，实际找到 ${#EXE_ENTRIES[@]} 个"
-                printf '%s\n' "${EXE_ENTRIES[@]}"
-                exit 1
-              fi
+          echo "===== SHA-256 ====="
+          sha256sum "$DOWNLOAD"
 
-              EXE_ENTRY="${EXE_ENTRIES[0]}"
-              EXE="input/$(basename -- "$EXE_ENTRY")"
-              unzip -p "$DOWNLOAD" "$EXE_ENTRY" > "$EXE"
-              ;;
-            *.exe)
-              EXE="$DOWNLOAD"
-              ;;
-            *)
-              echo "::error::不支持的 Release 资源类型: $ASSET_NAME"
-              exit 1
-              ;;
-          esac
+          # ----------------------------------------------------------
+          # 从 ZIP 中查找 EXE
+          # ----------------------------------------------------------
+
+          mapfile -t EXE_ENTRIES < <(
+            unzip -Z1 "$DOWNLOAD" \
+              | grep -Ei '\.exe$' \
+              || true
+          )
+
+          if [[ "${#EXE_ENTRIES[@]}" -eq 0 ]]; then
+            echo "::error::$DOWNLOAD 中没有找到 EXE"
+            exit 1
+          fi
+
+          if [[ "${#EXE_ENTRIES[@]}" -ne 1 ]]; then
+            echo "::error::$DOWNLOAD 必须恰好包含一个 EXE，实际找到 ${#EXE_ENTRIES[@]} 个"
+            echo "===== EXE candidates ====="
+            printf '%s\n' "${EXE_ENTRIES[@]}"
+            exit 1
+          fi
+
+          EXE_ENTRY="${EXE_ENTRIES[0]}"
+          EXE="input/$(basename -- "$EXE_ENTRY")"
+
+          echo "===== Extract EXE ====="
+          echo "$EXE_ENTRY"
+          echo "-> $EXE"
+
+          unzip -p \
+            "$DOWNLOAD" \
+            "$EXE_ENTRY" \
+            > "$EXE"
 
           if [[ ! -s "$EXE" ]]; then
-            echo "::error::没有得到可用的 EXE: $EXE"
+            echo "::error::没有得到可用的 EXE：$EXE"
             exit 1
           fi
 
+          echo "===== EXE ====="
+          ls -lh "$EXE"
+          sha256sum "$EXE"
+
+          # 后续步骤使用
           {
             echo "RELEASE_TAG=$RELEASE_TAG"
             echo "ASSET_NAME=$ASSET_NAME"
             echo "EXE=$EXE"
           } >> "$GITHUB_ENV"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
-          ls -lh "$DOWNLOAD"
-          ls -lh "$EXE"
-          sha256sum "$DOWNLOAD"
-          if [[ "$EXE" != "$DOWNLOAD" ]]; then
-            sha256sum "$EXE"
-          fi
+          {
+            echo "release_tag=$RELEASE_TAG"
+            echo "asset_name=$ASSET_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # tauri-dumper
+      # ------------------------------------------------------------
+
+      - name: Cache tauri-dumper
+        id: cache_tauri_dumper
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/tauri-dumper
+          key: ${{ runner.os }}-tauri-dumper-${{ env.TAURI_DUMPER_VERSION }}
+
+      - name: Install Rust
+        if: steps.cache_tauri_dumper.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install tauri-dumper
+        if: steps.cache_tauri_dumper.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          cargo install tauri-dumper --version 0.2.2 --locked
-          tauri-dumper --version
+
+          cargo install \
+            tauri-dumper \
+            --version "$TAURI_DUMPER_VERSION" \
+            --locked
+
+      - name: Configure tauri-dumper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+          if [[ ! -x "$HOME/.cargo/bin/tauri-dumper" ]]; then
+            echo "::error::tauri-dumper 不存在"
+            exit 1
+          fi
+
+          "$HOME/.cargo/bin/tauri-dumper" --version
+
+      # ------------------------------------------------------------
+      # 检查 Tauri
+      # ------------------------------------------------------------
 
       - name: Verify Tauri assets
         shell: bash
         run: |
           set -euo pipefail
-          tauri-dumper verify "$EXE"
+
+          tauri-dumper verify "$EXE" \
+            2>&1 | tee reports/tauri-verify.txt
+
+      # ------------------------------------------------------------
+      # 列出嵌入资源
+      # ------------------------------------------------------------
 
       - name: List embedded assets
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p reports
-          tauri-dumper list "$EXE" | tee reports/assets-tree.txt
-          tauri-dumper list "$EXE" --json > reports/assets.json
+
+          tauri-dumper list "$EXE" \
+            | tee reports/assets-tree.txt
+
+          tauri-dumper list "$EXE" \
+            --json \
+            > reports/assets.json
+
+      # ------------------------------------------------------------
+      # 提取
+      # ------------------------------------------------------------
 
       - name: Extract embedded assets
         shell: bash
@@ -171,7 +262,12 @@ jobs:
 
           tauri-dumper extract "$EXE" \
             -o docs \
-            --overwrite
+            --overwrite \
+            2>&1 | tee reports/tauri-extract.txt
+
+      # ------------------------------------------------------------
+      # 检查提取结果
+      # ------------------------------------------------------------
 
       - name: Check extracted Web files
         shell: bash
@@ -182,54 +278,81 @@ jobs:
           du -sh docs
 
           echo "===== 目标文件与目录 ====="
-          find docs \
-            \( -name "index.html" \
-            -o -name "application.js" \
-            -o -name "assets" \
-            -o -name "src" \
-            -o -name "cocos-js" \) \
-            -print | tee reports/target-files.txt
 
-          if ! find docs -type f -name "index.html" -print -quit | grep -q .; then
+          find docs \
+            \( \
+              -name "index.html" \
+              -o -name "application.js" \
+              -o -name "assets" \
+              -o -name "src" \
+              -o -name "cocos-js" \
+            \) \
+            -print \
+            | tee reports/target-files.txt
+
+          INDEX_HTML="$(
+            find docs \
+              -type f \
+              -name "index.html" \
+              -print \
+              -quit
+          )"
+
+          if [[ -z "$INDEX_HTML" ]]; then
             echo "::error::没有找到 index.html"
             exit 1
           fi
+
+          echo "index.html: $INDEX_HTML"
+
+      # ------------------------------------------------------------
+      # 音频懒加载
+      #
+      # 注意：
+      # 这里只修改运行时加载逻辑。
+      # 不进行 MP3/AAC/M4A 转码或压缩。
+      # ------------------------------------------------------------
 
       - name: Patch runtime for lazy DOM audio loading
         if: ${{ inputs.enable_audio_lazy_loading }}
         shell: bash
         run: |
           set -euo pipefail
+
           python3 scripts/patch_audio_runtime.py \
             docs \
             reports/audio-runtime-patch.txt
 
-      - name: Install media transcode tools
-        if: ${{ inputs.enable_compression }}
+      # ------------------------------------------------------------
+      # 最终检查
+      # ------------------------------------------------------------
+
+      - name: Show final asset size
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install \
-            --yes \
-            --no-install-recommends \
-            ffmpeg \
-            libavif-bin
 
-          avifenc --version
-          ffmpeg -version
+          echo "===== Final docs size ====="
+          du -sh docs
 
-      - name: Transcode PNG and MP3 assets in place
-        if: ${{ inputs.enable_compression }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/transcode-assets.sh docs reports/transcode-summary.txt
+          echo "===== File count ====="
+          find docs -type f | wc -l
+
+          echo "===== Reports ====="
+          find reports \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
+
+      # ------------------------------------------------------------
+      # 上传
+      # ------------------------------------------------------------
 
       - name: Upload extracted assets
         uses: actions/upload-artifact@v4
         with:
-          name: pvzge-gpnext-${{ steps.download.outputs.release_tag }}
+          name: pvzge-lite-${{ steps.download.outputs.release_tag }}
           path: |
             docs/
             reports/
