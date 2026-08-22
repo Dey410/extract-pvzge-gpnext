@@ -334,6 +334,19 @@ jobs:
       # 不进行任何音频转码或压缩
       # ============================================================
 
+      - name: Ensure ffprobe is available
+        if: ${{ inputs.enable_hybrid_audio_loading }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! command -v ffprobe >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends ffmpeg
+          fi
+
+          ffprobe -version
+
       - name: Patch runtime for hybrid audio loading
         if: ${{ inputs.enable_hybrid_audio_loading }}
         shell: bash
