@@ -28,6 +28,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 获取最新 Release 中非 macOS 的 pvzge-lite-*.zip
+      # ============================================================
+
       - name: Download and unpack PvZGE Lite
         id: download
         shell: bash
@@ -43,15 +47,15 @@ jobs:
 
           RELEASE_TAG="$REQUESTED_RELEASE_TAG"
 
-          # 未指定标签时获取最新非草稿 Release。
-          # 包含 Pre-release。
+          # 未指定 tag 时：
+          # 获取最新非 Draft Release
+          # Pre-release 也包含在内
           if [[ -z "$RELEASE_TAG" ]]; then
             RELEASE_TAG="$(
               gh release list \
                 --repo "$REPO" \
                 --exclude-drafts \
                 --limit 1 \
-                --order desc \
                 --json tagName \
                 --jq '.[0].tagName'
             )"
@@ -65,7 +69,10 @@ jobs:
           echo "===== Release ====="
           echo "$RELEASE_TAG"
 
-          # 获取该 Release 的资源列表
+          # ----------------------------------------------------------
+          # 获取 Release Asset
+          # ----------------------------------------------------------
+
           RELEASE_JSON="$(
             gh release view "$RELEASE_TAG" \
               --repo "$REPO" \
@@ -75,20 +82,30 @@ jobs:
           echo "===== Release assets ====="
           jq -r '.assets[].name' <<< "$RELEASE_JSON"
 
-          # 仅选择 pvzge-lite-*.zip
+          # ----------------------------------------------------------
+          # 只选择：
+          #
+          # pvzge-lite-0.13.0.zip
+          #
+          # 排除：
+          #
+          # pvzge-lite-macos-0.13.0.zip
+          # ----------------------------------------------------------
+
           mapfile -t ASSET_CANDIDATES < <(
             jq -r '.assets[].name' <<< "$RELEASE_JSON" \
               | grep -Ei '^pvzge-lite-.+\.zip$' \
+              | grep -Eiv '^pvzge-lite-macos-' \
               || true
           )
 
           if [[ "${#ASSET_CANDIDATES[@]}" -eq 0 ]]; then
-            echo "::error::Release $RELEASE_TAG 中没有找到 pvzge-lite-*.zip"
+            echo "::error::Release $RELEASE_TAG 中没有找到非 macOS 的 pvzge-lite-*.zip"
             exit 1
           fi
 
           if [[ "${#ASSET_CANDIDATES[@]}" -ne 1 ]]; then
-            echo "::error::Release $RELEASE_TAG 中找到多个 pvzge-lite-*.zip，无法自动确定"
+            echo "::error::Release $RELEASE_TAG 中找到多个非 macOS 的 pvzge-lite-*.zip"
             echo "===== Candidates ====="
             printf '%s\n' "${ASSET_CANDIDATES[@]}"
             exit 1
@@ -99,6 +116,10 @@ jobs:
 
           echo "===== Selected asset ====="
           echo "$ASSET_NAME"
+
+          # ----------------------------------------------------------
+          # 下载 ZIP
+          # ----------------------------------------------------------
 
           gh release download "$RELEASE_TAG" \
             --repo "$REPO" \
@@ -116,7 +137,10 @@ jobs:
           echo "===== ZIP SHA-256 ====="
           sha256sum "$DOWNLOAD"
 
-          # 从 ZIP 内查找 EXE
+          # ----------------------------------------------------------
+          # 从 ZIP 中提取 EXE
+          # ----------------------------------------------------------
+
           mapfile -t EXE_ENTRIES < <(
             unzip -Z1 "$DOWNLOAD" \
               | grep -Ei '\.exe$' \
@@ -160,6 +184,10 @@ jobs:
           echo "===== EXE SHA-256 ====="
           sha256sum "$EXE"
 
+          # ----------------------------------------------------------
+          # 保存环境变量 / outputs
+          # ----------------------------------------------------------
+
           {
             echo "RELEASE_TAG=$RELEASE_TAG"
             echo "ASSET_NAME=$ASSET_NAME"
@@ -170,6 +198,10 @@ jobs:
             echo "release_tag=$RELEASE_TAG"
             echo "asset_name=$ASSET_NAME"
           } >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # tauri-dumper
+      # ============================================================
 
       - name: Cache tauri-dumper
         id: cache_tauri_dumper
@@ -207,6 +239,10 @@ jobs:
 
           "$HOME/.cargo/bin/tauri-dumper" --version
 
+      # ============================================================
+      # 验证 Tauri
+      # ============================================================
+
       - name: Verify Tauri assets
         shell: bash
         run: |
@@ -214,6 +250,10 @@ jobs:
 
           tauri-dumper verify "$EXE" \
             2>&1 | tee reports/tauri-verify.txt
+
+      # ============================================================
+      # 列出嵌入资源
+      # ============================================================
 
       - name: List embedded assets
         shell: bash
@@ -227,6 +267,10 @@ jobs:
             --json \
             > reports/assets.json
 
+      # ============================================================
+      # 提取资源
+      # ============================================================
+
       - name: Extract embedded assets
         shell: bash
         run: |
@@ -239,6 +283,10 @@ jobs:
             -o docs \
             --overwrite \
             2>&1 | tee reports/tauri-extract.txt
+
+      # ============================================================
+      # 检查提取结果
+      # ============================================================
 
       - name: Check extracted Web files
         shell: bash
@@ -280,6 +328,12 @@ jobs:
           echo "===== index.html ====="
           echo "$INDEX_HTML"
 
+      # ============================================================
+      # 音频懒加载
+      #
+      # 不进行任何音频转码或压缩
+      # ============================================================
+
       - name: Patch runtime for lazy DOM audio loading
         if: ${{ inputs.enable_audio_lazy_loading }}
         shell: bash
@@ -294,6 +348,10 @@ jobs:
           python3 scripts/patch_audio_runtime.py \
             docs \
             reports/audio-runtime-patch.txt
+
+      # ============================================================
+      # 最终信息
+      # ============================================================
 
       - name: Show final asset information
         shell: bash
@@ -318,6 +376,10 @@ jobs:
             -type f \
             -printf '%f\n' \
             | sort
+
+      # ============================================================
+      # 上传 Artifact
+      # ============================================================
 
       - name: Upload extracted assets
         uses: actions/upload-artifact@v4
