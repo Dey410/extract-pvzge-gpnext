@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Gzh0821/pvzg_site 的 Release 标签（留空则使用最新版）"
+        description: "Gzh0821/pvzg_site 的 Release 标签（留空则使用最新非草稿 Release，包含 Pre-release）"
         required: false
 
       enable_audio_lazy_loading:
@@ -25,16 +25,8 @@ jobs:
       TAURI_DUMPER_VERSION: "0.2.2"
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------------
-
       - name: Checkout
         uses: actions/checkout@v4
-
-      # ------------------------------------------------------------
-      # 获取 pvzge-lite-*.zip
-      # ------------------------------------------------------------
 
       - name: Download and unpack PvZGE Lite
         id: download
@@ -51,13 +43,17 @@ jobs:
 
           RELEASE_TAG="$REQUESTED_RELEASE_TAG"
 
-          # 未指定 Release 标签时使用 Latest Release
+          # 未指定标签时获取最新非草稿 Release。
+          # 包含 Pre-release。
           if [[ -z "$RELEASE_TAG" ]]; then
             RELEASE_TAG="$(
-              gh release view \
+              gh release list \
                 --repo "$REPO" \
+                --exclude-drafts \
+                --limit 1 \
+                --order desc \
                 --json tagName \
-                --jq '.tagName'
+                --jq '.[0].tagName'
             )"
           fi
 
@@ -69,7 +65,7 @@ jobs:
           echo "===== Release ====="
           echo "$RELEASE_TAG"
 
-          # 获取 Release 中全部资源文件
+          # 获取该 Release 的资源列表
           RELEASE_JSON="$(
             gh release view "$RELEASE_TAG" \
               --repo "$REPO" \
@@ -79,12 +75,7 @@ jobs:
           echo "===== Release assets ====="
           jq -r '.assets[].name' <<< "$RELEASE_JSON"
 
-          # 只选择：
-          #
-          # pvzge-lite-*.zip
-          #
-          # 例如：
-          # pvzge-lite-0.13.0.zip
+          # 仅选择 pvzge-lite-*.zip
           mapfile -t ASSET_CANDIDATES < <(
             jq -r '.assets[].name' <<< "$RELEASE_JSON" \
               | grep -Ei '^pvzge-lite-.+\.zip$' \
@@ -97,7 +88,7 @@ jobs:
           fi
 
           if [[ "${#ASSET_CANDIDATES[@]}" -ne 1 ]]; then
-            echo "::error::Release $RELEASE_TAG 中找到多个 pvzge-lite-*.zip，无法确定使用哪一个"
+            echo "::error::Release $RELEASE_TAG 中找到多个 pvzge-lite-*.zip，无法自动确定"
             echo "===== Candidates ====="
             printf '%s\n' "${ASSET_CANDIDATES[@]}"
             exit 1
@@ -109,7 +100,6 @@ jobs:
           echo "===== Selected asset ====="
           echo "$ASSET_NAME"
 
-          # 下载指定 ZIP
           gh release download "$RELEASE_TAG" \
             --repo "$REPO" \
             --pattern "$ASSET_NAME" \
@@ -120,16 +110,13 @@ jobs:
             exit 1
           fi
 
-          echo "===== Downloaded file ====="
+          echo "===== Downloaded ZIP ====="
           ls -lh "$DOWNLOAD"
 
-          echo "===== SHA-256 ====="
+          echo "===== ZIP SHA-256 ====="
           sha256sum "$DOWNLOAD"
 
-          # ----------------------------------------------------------
-          # 从 ZIP 中查找 EXE
-          # ----------------------------------------------------------
-
+          # 从 ZIP 内查找 EXE
           mapfile -t EXE_ENTRIES < <(
             unzip -Z1 "$DOWNLOAD" \
               | grep -Ei '\.exe$' \
@@ -143,8 +130,10 @@ jobs:
 
           if [[ "${#EXE_ENTRIES[@]}" -ne 1 ]]; then
             echo "::error::$DOWNLOAD 必须恰好包含一个 EXE，实际找到 ${#EXE_ENTRIES[@]} 个"
+
             echo "===== EXE candidates ====="
             printf '%s\n' "${EXE_ENTRIES[@]}"
+
             exit 1
           fi
 
@@ -167,9 +156,10 @@ jobs:
 
           echo "===== EXE ====="
           ls -lh "$EXE"
+
+          echo "===== EXE SHA-256 ====="
           sha256sum "$EXE"
 
-          # 后续步骤使用
           {
             echo "RELEASE_TAG=$RELEASE_TAG"
             echo "ASSET_NAME=$ASSET_NAME"
@@ -180,10 +170,6 @@ jobs:
             echo "release_tag=$RELEASE_TAG"
             echo "asset_name=$ASSET_NAME"
           } >> "$GITHUB_OUTPUT"
-
-      # ------------------------------------------------------------
-      # tauri-dumper
-      # ------------------------------------------------------------
 
       - name: Cache tauri-dumper
         id: cache_tauri_dumper
@@ -221,10 +207,6 @@ jobs:
 
           "$HOME/.cargo/bin/tauri-dumper" --version
 
-      # ------------------------------------------------------------
-      # 检查 Tauri
-      # ------------------------------------------------------------
-
       - name: Verify Tauri assets
         shell: bash
         run: |
@@ -232,10 +214,6 @@ jobs:
 
           tauri-dumper verify "$EXE" \
             2>&1 | tee reports/tauri-verify.txt
-
-      # ------------------------------------------------------------
-      # 列出嵌入资源
-      # ------------------------------------------------------------
 
       - name: List embedded assets
         shell: bash
@@ -249,25 +227,18 @@ jobs:
             --json \
             > reports/assets.json
 
-      # ------------------------------------------------------------
-      # 提取
-      # ------------------------------------------------------------
-
       - name: Extract embedded assets
         shell: bash
         run: |
           set -euo pipefail
 
+          rm -rf docs
           mkdir -p docs
 
           tauri-dumper extract "$EXE" \
             -o docs \
             --overwrite \
             2>&1 | tee reports/tauri-extract.txt
-
-      # ------------------------------------------------------------
-      # 检查提取结果
-      # ------------------------------------------------------------
 
       - name: Check extracted Web files
         shell: bash
@@ -276,6 +247,9 @@ jobs:
 
           echo "===== 提取目录大小 ====="
           du -sh docs
+
+          echo "===== 文件数量 ====="
+          find docs -type f | wc -l
 
           echo "===== 目标文件与目录 ====="
 
@@ -303,15 +277,8 @@ jobs:
             exit 1
           fi
 
-          echo "index.html: $INDEX_HTML"
-
-      # ------------------------------------------------------------
-      # 音频懒加载
-      #
-      # 注意：
-      # 这里只修改运行时加载逻辑。
-      # 不进行 MP3/AAC/M4A 转码或压缩。
-      # ------------------------------------------------------------
+          echo "===== index.html ====="
+          echo "$INDEX_HTML"
 
       - name: Patch runtime for lazy DOM audio loading
         if: ${{ inputs.enable_audio_lazy_loading }}
@@ -319,23 +286,30 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [[ ! -f scripts/patch_audio_runtime.py ]]; then
+            echo "::error::缺少 scripts/patch_audio_runtime.py"
+            exit 1
+          fi
+
           python3 scripts/patch_audio_runtime.py \
             docs \
             reports/audio-runtime-patch.txt
 
-      # ------------------------------------------------------------
-      # 最终检查
-      # ------------------------------------------------------------
-
-      - name: Show final asset size
+      - name: Show final asset information
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "===== Release ====="
+          echo "$RELEASE_TAG"
+
+          echo "===== Source asset ====="
+          echo "$ASSET_NAME"
+
           echo "===== Final docs size ====="
           du -sh docs
 
-          echo "===== File count ====="
+          echo "===== Final file count ====="
           find docs -type f | wc -l
 
           echo "===== Reports ====="
@@ -344,10 +318,6 @@ jobs:
             -type f \
             -printf '%f\n' \
             | sort
-
-      # ------------------------------------------------------------
-      # 上传
-      # ------------------------------------------------------------
 
       - name: Upload extracted assets
         uses: actions/upload-artifact@v4
