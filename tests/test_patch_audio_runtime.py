@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,13 +39,13 @@ GAME_SOURCE = (
 
 
 class PatchEngineSourceTests(unittest.TestCase):
-    def test_keeps_lazy_dom_loader_and_routes_only_listed_paths_to_dom(self):
+    def test_preloads_dom_metadata_and_routes_only_listed_paths_to_dom(self):
         patched, changes = patch_engine_source(
             DOM_LOADER + DOM_SELECTORS,
             ["assets/resources/native/ab/long-track.mp3"],
         )
 
-        self.assertIn('n.preload="none"', patched)
+        self.assertIn('n.preload="metadata"', patched)
         self.assertIn("n.__pvzgeLazySrc=t", patched)
         self.assertIn("t.src=t.__pvzgeLazySrc", patched)
         self.assertNotIn('"canplaythrough"', patched)
@@ -62,6 +63,70 @@ class PatchEngineSourceTests(unittest.TestCase):
     def test_rejects_unknown_engine_layout(self):
         with self.assertRaises(PatchError):
             patch_engine_source("unrelated JavaScript", [])
+
+
+class DomAudioLifecycleTests(unittest.TestCase):
+    def run_audio_scenario(self, scenario):
+        patched, _ = patch_engine_source(DOM_LOADER + ";" + DOM_SELECTORS, [])
+        # Run the generated loader and play hook; routing has separate coverage.
+        runtime = patched.split("E9.support&&!__pvzgeUseDomAudio", 1)[0]
+        program = r'''
+const assert = require("node:assert/strict");
+const t = {};
+function makeAudio(src = "") {
+    return {
+        src, events: [],
+        load() { this.events.push(["load", this.src, this.preload]); },
+        play() { this.events.push(["play", this.src]); return Promise.resolve(); }
+    };
+}
+const document = { createElement: () => makeAudio() };
+RUNTIME
+(async () => {
+SCENARIO
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''.replace("RUNTIME", runtime).replace("SCENARIO", scenario)
+        result = subprocess.run(
+            ["node", "-"], input=program, capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_loader_requests_metadata_before_any_play(self):
+        self.run_audio_scenario('''
+const audio = await t.loadNative("long.m4a");
+assert.equal(audio.src, "long.m4a");
+assert.equal(audio.__pvzgeLazySrc, "long.m4a");
+assert.deepEqual(audio.events, [["load", "long.m4a", "metadata"]]);
+''')
+
+    def test_play_does_not_reload_a_prebound_source(self):
+        self.run_audio_scenario('''
+const audio = await t.loadNative("long.m4a");
+audio.events = [];
+audio.__pvzgeLazySrc = "stale.m4a";
+await p9(audio);
+await p9(audio);
+assert.deepEqual(audio.events, [["play", "long.m4a"], ["play", "long.m4a"]]);
+''')
+
+    def test_legacy_unbound_source_loads_once_before_play(self):
+        self.run_audio_scenario('''
+const audio = makeAudio();
+audio.__pvzgeLazySrc = "legacy.m4a";
+await p9(audio);
+await p9(audio);
+assert.deepEqual(audio.events, [
+    ["load", "legacy.m4a", undefined],
+    ["play", "legacy.m4a"], ["play", "legacy.m4a"]
+]);
+''')
+
+    def test_missing_fallback_url_does_not_trigger_load(self):
+        self.run_audio_scenario('''
+const audio = makeAudio();
+await p9(audio);
+assert.deepEqual(audio.events, [["play", ""]]);
+''')
 
 
 class AudioClassificationTests(unittest.TestCase):

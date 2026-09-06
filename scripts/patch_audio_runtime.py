@@ -159,8 +159,9 @@ def patch_engine_source(
         return (
             match.group("head")
             + f'var {audio}=document.createElement("audio");'
-            + f'{audio}.preload="none",'
+            + f'{audio}.preload="metadata",'
             + f"{audio}.__pvzgeLazySrc={url},"
+            + f"{audio}.src={url},{audio}.load(),"
             + f"{resolve}({audio})"
             + "}))}"
         )
@@ -172,7 +173,7 @@ def patch_engine_source(
         return (
             match.group(0)[: match.group(0).rfind("var ")]
             + f"{audio}.src||!{audio}.__pvzgeLazySrc||"
-            + f"({audio}.src={audio}.__pvzgeLazySrc);"
+            + f"({audio}.src={audio}.__pvzgeLazySrc,{audio}.load());"
             + f"var {match.group('result')}={audio}.play();"
         )
 
@@ -304,11 +305,13 @@ def patch_docs(
             f"Hybrid selector replacements: {engine_changes['hybrid_selector']}",
             "",
             "Behavior:",
-            "  Audio at or above the threshold uses lazy DOM Audio.",
+            "  Audio at or above the threshold uses DOM Audio with metadata preloading.",
             "  Audio below the threshold uses the original Web Audio loader.",
-            "  Duration probe failures conservatively use lazy DOM Audio.",
-            '  DOM HTMLAudioElement instances use preload="none".',
-            "  A DOM Audio URL is assigned immediately before its first play().",
+            "  Duration probe failures conservatively use DOM Audio with metadata preloading.",
+            '  DOM HTMLAudioElement instances use preload="metadata".',
+            "  DOM Audio URLs are assigned and load() is called at element creation.",
+            "  Playback binds and loads a fallback URL only if src is still missing.",
+            "  Metadata preloading does not guarantee decoded audio is ready to play.",
             "",
             "Audio decisions:",
             *decision_lines,
