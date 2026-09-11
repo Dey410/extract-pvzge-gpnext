@@ -185,8 +185,8 @@ def discover_jobs(args: argparse.Namespace) -> list[TextureJob]:
     )
     for source in paths:
         astc_path = source.with_suffix(".astc")
-        if astc_path in outputs or astc_path.exists():
-            raise AstcError(f"ASTC output already exists or has duplicate sources: {astc_path}")
+        if astc_path in outputs:
+            raise AstcError(f"ASTC output has duplicate sources: {astc_path}")
         outputs.add(astc_path)
         # Content detection handles AVIF data stored at a .png path.
         with Image.open(source) as image:
@@ -226,6 +226,15 @@ def discover_jobs(args: argparse.Namespace) -> list[TextureJob]:
                     **policy, largest_alpha_component_fraction=largest_component
                 )
 
+        # Lite releases can include both AVIF and a ready-to-use ASTC texture.
+        # Retain its actual block size so Cocos metadata matches the file.
+        if astc_path.exists():
+            info = parse_astc_header(astc_path.read_bytes())
+            block = f"{info.block_x}x{info.block_y}"
+            if block not in ASTC_FORMAT_CODES:
+                raise AstcError(f"{astc_path}: unsupported existing ASTC block {block}")
+            reason = "existing_astc"
+
         png_path = args.work_dir / f"{len(jobs):06d}.png"
         png_path.write_bytes(png_data)
         relative = source.relative_to(args.docs_dir)
@@ -235,6 +244,8 @@ def discover_jobs(args: argparse.Namespace) -> list[TextureJob]:
             width, height, source_format, source.stat().st_size,
             png_size, block, reason, largest_component,
         ))
+        if reason == "existing_astc":
+            _validate_astc_file(astc_path, jobs[-1])
     if not jobs:
         raise AstcError(f"no native PNG/AVIF textures found below {args.docs_dir}")
     return jobs
@@ -262,6 +273,9 @@ def _validate_astc_file(path: Path, job: TextureJob) -> None:
 def encode_texture(
     job: TextureJob, encoder: str, preset: str, encoder_threads: int
 ) -> int:
+    if job.reason == "existing_astc":
+        _validate_astc_file(job.astc_path, job)
+        return job.astc_path.stat().st_size
     # A unique same-directory staging file permits atomic publication.
     # Failed staging files are retained for inspection, never deleted.
     with tempfile.NamedTemporaryFile(
@@ -296,7 +310,7 @@ def encode_all(
                 total_bytes += future.result()
                 completed += 1
                 if completed == len(jobs) or completed % 25 == 0:
-                    print(f"Encoded {completed}/{len(jobs)} ASTC textures")
+                    print(f"Processed {completed}/{len(jobs)} ASTC textures (encoded or reused)")
         except BaseException:
             for future in futures:
                 future.cancel()
@@ -437,10 +451,12 @@ def write_report(args: argparse.Namespace, jobs: list[TextureJob],
         f"Alpha threshold / analysis size: {args.alpha_threshold} / {args.analysis_size}px",
         "AVIF classification uses decoded RGBA PNG bytes, not AVIF bytes.",
         f"Textures: {len(jobs)}",
+        f"Existing ASTC reused: {sum(j.reason == 'existing_astc' for j in jobs)}",
+        f"New ASTC encoded: {sum(j.reason != 'existing_astc' for j in jobs)}",
         *[f"Input {fmt}: {sum(j.source_format == fmt for j in jobs)}" for fmt in ("PNG", "AVIF")],
         *[f"ASTC {block}: {sum(j.block == block for j in jobs)}" for block in ASTC_FORMAT_CODES],
         f"Source bytes (retained): {sum(j.source_bytes for j in jobs)}",
-        f"ASTC bytes (additional): {astc_bytes}",
+        f"ASTC bytes (total, including reused): {astc_bytes}",
         f"ImageAsset JSON files rewritten: {metadata_count}",
         f"Original metadata backup: {backup_dir}",
         f"Per-texture map: {map_path}",

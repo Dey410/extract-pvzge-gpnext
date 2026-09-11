@@ -26,6 +26,10 @@ AVIF 的细节判定使用解码后 RGBA PNG 的大小，不能使用 AVIF 压�
 
 转换前校验独立和打包 ImageAsset 的映射；全部 ASTC 编码成功、头部尺寸及
 数据长度校验通过后，更新 JSON 的 `fmt` 为对应 ASTC 格式。
+Lite 原包可能已为部分图片附带 ASTC（例如 0.14.0 的 `1aae2f737`）。
+已有 ASTC 通过格式、尺寸和数据长度校验后直接复用，元数据使用该文件实际的
+块大小；缺少 ASTC 的图片才按上表参数生成。损坏或尺寸不匹配的文件会报错，
+不会覆盖。报告会分别列出复用数量和新编码数量。
 原图保留在原路径，原元数据备份在 `reports/astc-original-metadata-*/`，
 可按备份的 `assets/` 相对路径复制回 `docs/` 恢复原图引用。
 转换报告为 `reports/astc-texture-summary.txt`，逐图参数为
@@ -50,5 +54,5 @@ python3 -m unittest discover -s tests -v
 python3 scripts/transcode_textures_astc.py docs reports/astc-texture-summary.txt
 ```
 
-`--help` 可查看质量及分类阈值选项。重复转换遇到已有 `.astc` 会报错，
-应对一份新提取的资源运行。中间 PNG 留在日志列出的临时目录中，不执行删除。
+`--help` 可查看质量及分类阈值选项。重复运行会复用已验证的 `.astc`；
+若想改变编码参数，请使用一份新提取的资源。中间 PNG 留在日志列出的临时目录中，不执行删除。

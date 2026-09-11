@@ -117,13 +117,50 @@ class TextureTests(unittest.TestCase):
         with self.assertRaisesRegex(AstcError, "duplicate sources"):
             discover_jobs(self.args)
 
-    def test_rejects_existing_astc_without_overwriting(self):
+    def test_rejects_invalid_existing_astc_without_overwriting(self):
         source = self.texture()
         output = source.with_suffix(".astc")
         output.write_bytes(b"existing asset")
-        with self.assertRaisesRegex(AstcError, "already exists"):
+        with self.assertRaisesRegex(AstcError, "not an ASTC"):
             discover_jobs(self.args)
         self.assertEqual(output.read_bytes(), b"existing asset")
+
+    def existing_astc(self, source, width=65, height=33, block=8):
+        output = source.with_suffix(".astc")
+        header = bytes.fromhex("13aba15c") + bytes((block, block, 1))
+        header += b"".join(value.to_bytes(3, "little") for value in (width, height, 1))
+        blocks = ((width + block - 1) // block) * ((height + block - 1) // block)
+        output.write_bytes(header + bytes(16 * blocks))
+        return output
+
+    def test_reuses_existing_astc_with_its_actual_block_and_metadata(self):
+        source = self.texture(extension=".avif")
+        output = self.existing_astc(source, block=8)
+        metadata = self.metadata(source)
+        before = output.read_bytes()
+        job = discover_jobs(self.args)[0]
+        # A new small texture would use 4x4; an existing valid 8x8 is retained.
+        self.assertEqual((job.block, job.reason), ("8x8", "existing_astc"))
+        self.assertEqual(json.loads(plan_metadata([job])[metadata])[0]["fmt"], "7@96")
+        with patch("scripts.transcode_textures_astc.subprocess.run") as encoder:
+            self.assertEqual(encode_texture(job, "encoder", "fast", 1), len(before))
+        encoder.assert_not_called()
+        self.assertEqual(output.read_bytes(), before)
+
+    def test_rejects_existing_astc_with_wrong_dimensions(self):
+        source = self.texture()
+        output = self.existing_astc(source, width=64)
+        before = output.read_bytes()
+        with self.assertRaisesRegex(AstcError, "expected 65x33x1"):
+            discover_jobs(self.args)
+        self.assertEqual(output.read_bytes(), before)
+
+    def test_rejects_truncated_existing_astc(self):
+        source = self.texture()
+        output = self.existing_astc(source)
+        output.write_bytes(output.read_bytes()[:-1])
+        with self.assertRaisesRegex(AstcError, "expected .* bytes"):
+            discover_jobs(self.args)
 
     def test_rejects_corrupt_input(self):
         source = self.texture()
