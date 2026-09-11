@@ -7,6 +7,15 @@ on:
         description: "Gzh0821/pvzg_site 的 Release 标签（留空则使用最新非草稿 Release，包含 Pre-release）"
         required: false
 
+      image_transcode_format:
+        description: "图片处理：none=保留原图；astc=将 native AVIF/PNG 转为 ASTC，保留原图并更新元数据（设备需支持 ASTC）"
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - astc
+
       enable_hybrid_audio_loading:
         description: "按时长选择音频后端：长音频懒加载 DOM，短音频使用 Web Audio"
         required: true
@@ -361,6 +370,69 @@ jobs:
           python3 scripts/patch_audio_runtime.py \
             docs \
             reports/audio-runtime-patch.txt
+
+      # ============================================================
+      # ASTC 纹理转换（参数沿用 compact-150-audio-policy）
+      # ============================================================
+
+      - name: Set up Python for ASTC
+        if: ${{ inputs.image_transcode_format == 'astc' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ASTC tools
+        if: ${{ inputs.image_transcode_format == 'astc' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --only-binary=:all: -r scripts/requirements-astc.txt
+          python3 -c 'from PIL import features; assert features.check("avif"), "Pillow AVIF decoder unavailable"'
+
+          ASTCENC_VERSION="5.6.0"
+          ASTCENC_ARCHIVE="astcenc-${ASTCENC_VERSION}-linux-x64.zip"
+          ASTCENC_SHA256="4fa262fb4883997b2b38a95c0de3b7ee26d22ac7ab1ebd030558089f2e917502"
+          ASTCENC_URL="https://github.com/ARM-software/astc-encoder/releases/download/${ASTCENC_VERSION}/${ASTCENC_ARCHIVE}"
+          ASTCENC_DOWNLOAD="$RUNNER_TEMP/$ASTCENC_ARCHIVE"
+          ASTCENC_EXTRACT="$RUNNER_TEMP/astcenc-$ASTCENC_VERSION"
+          ASTCENC_BIN_DIR="$RUNNER_TEMP/astcenc-bin"
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 5 --retry-all-errors \
+            --output "$ASTCENC_DOWNLOAD" "$ASTCENC_URL"
+          echo "$ASTCENC_SHA256  $ASTCENC_DOWNLOAD" | sha256sum --check --strict
+          unzip -q "$ASTCENC_DOWNLOAD" -d "$ASTCENC_EXTRACT"
+
+          CPU_FLAGS=" $(grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2-) "
+          if [[ "$CPU_FLAGS" == *" avx2 "* \
+            && "$CPU_FLAGS" == *" sse4_2 "* \
+            && "$CPU_FLAGS" == *" popcnt "* \
+            && "$CPU_FLAGS" == *" f16c "* ]]; then
+            ASTCENC_VARIANT="avx2"
+          elif [[ "$CPU_FLAGS" == *" sse4_1 "* \
+            && "$CPU_FLAGS" == *" popcnt "* ]]; then
+            ASTCENC_VARIANT="sse4.1"
+          else
+            ASTCENC_VARIANT="sse2"
+          fi
+          mkdir -p "$ASTCENC_BIN_DIR"
+          install -m 0755 "$ASTCENC_EXTRACT/bin/astcenc-$ASTCENC_VARIANT" \
+            "$ASTCENC_BIN_DIR/astcenc"
+          echo "$ASTCENC_BIN_DIR" >> "$GITHUB_PATH"
+          "$ASTCENC_BIN_DIR/astcenc" -version
+
+      - name: Test ASTC conversion
+        if: ${{ inputs.image_transcode_format == 'astc' }}
+        shell: bash
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Transcode native textures to ASTC
+        if: ${{ inputs.image_transcode_format == 'astc' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/transcode_textures_astc.py \
+            docs reports/astc-texture-summary.txt
 
       # ============================================================
       # 最终信息
