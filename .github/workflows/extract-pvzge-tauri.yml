@@ -201,10 +201,7 @@ jobs:
             echo "EXE=$EXE"
           } >> "$GITHUB_ENV"
 
-          {
-            echo "release_tag=$RELEASE_TAG"
-            echo "asset_name=$ASSET_NAME"
-          } >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # tauri-dumper

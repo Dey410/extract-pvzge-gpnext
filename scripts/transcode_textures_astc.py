@@ -229,7 +229,8 @@ def discover_jobs(args: argparse.Namespace) -> list[TextureJob]:
         # Lite releases can include both AVIF and a ready-to-use ASTC texture.
         # Retain its actual block size so Cocos metadata matches the file.
         if astc_path.exists():
-            info = parse_astc_header(astc_path.read_bytes())
+            with astc_path.open("rb") as asset:
+                info = parse_astc_header(asset.read(16))
             block = f"{info.block_x}x{info.block_y}"
             if block not in ASTC_FORMAT_CODES:
                 raise AstcError(f"{astc_path}: unsupported existing ASTC block {block}")
@@ -252,8 +253,9 @@ def discover_jobs(args: argparse.Namespace) -> list[TextureJob]:
 
 
 def _validate_astc_file(path: Path, job: TextureJob) -> None:
-    data = path.read_bytes()
-    info = parse_astc_header(data)
+    with path.open("rb") as asset:
+        info = parse_astc_header(asset.read(16))
+        size = os.fstat(asset.fileno()).st_size
     block = int(job.block.split("x", 1)[0])
     actual = (info.block_x, info.block_y, info.block_z)
     expected = (block, block, 1)
@@ -264,9 +266,9 @@ def _validate_astc_file(path: Path, job: TextureJob) -> None:
             f"{path}: expected {job.width}x{job.height}x1, "
             f"got {info.width}x{info.height}x{info.depth}"
         )
-    if len(data) != info.expected_size:
+    if size != info.expected_size:
         raise AstcError(
-            f"{path}: expected {info.expected_size} bytes, got {len(data)}"
+            f"{path}: expected {info.expected_size} bytes, got {size}"
         )
 
 
@@ -586,8 +588,6 @@ def main(argv: list[str] | None = None) -> int:
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, backup)
         astc_bytes = encode_all(jobs, encoder, args.preset, args.jobs, args.encoder_threads)
-        for job in jobs:
-            _validate_astc_file(job.astc_path, job)
         for path, data in documents.items():
             _write_atomic(path, data)
         write_report(args, jobs, astc_bytes, len(documents),

@@ -166,8 +166,12 @@ def patch_docs(docs_dir: Path, report_path: Path) -> None:
     if settings.get('CocosEngine') != '3.8.4':
         raise PatchError('only the verified Cocos 3.8.4 audio layout is supported')
     music = music_audio_paths(docs_dir)
-    candidates = [path for path in sorted((docs_dir / 'cocos-js').glob('_virtual_cc-*.js'))
-                  if b'document.createElement("audio")' in path.read_bytes() and b'.DOM_AUDIO' in path.read_bytes()]
+    candidates = []
+    for path in sorted((docs_dir / 'cocos-js').glob('_virtual_cc-*.js')):
+        source = path.read_bytes()
+        if b'document.createElement("audio")' in source and b'.DOM_AUDIO' in source:
+            candidates.append(path)
+        del source
     if len(candidates) != 1:
         raise PatchError(f'expected one Cocos audio runtime, found {len(candidates)}')
     engine = candidates[0]

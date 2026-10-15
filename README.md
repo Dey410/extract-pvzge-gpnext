@@ -44,4 +44,4 @@ python3 -m scripts.resource_package SOURCE_DOCS NEW_OUTPUT REPORTS/astc-texture-
   --producer-commit ACTUAL_COMMIT_SHA --report REPORTS/package-build.json
 ```
 
-测试夹具和失败暂存文件保留，不执行递归删除。历史 `transcode-assets.sh` 不属于当前构建管线。
+测试夹具和失败暂存文件保留，不执行递归删除。

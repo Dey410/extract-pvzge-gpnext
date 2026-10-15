@@ -15,7 +15,6 @@ from scripts.transcode_textures_astc import AstcError, TextureJob, _validate_ast
 HOST_ABI = 1
 MANIFEST_PATH = '__gardendless/package/resource-manifest.json'
 INDEX_PATH = '__gardendless/package/file-index.json'
-METADATA = {MANIFEST_PATH, INDEX_PATH}
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 MAX_FILES = 200_000
@@ -132,13 +131,15 @@ def assemble_package(source: Path, output: Path, texture_map: Path, producer_com
     selected_astc = {j.astc_path for j in jobs}
     legacy_gpu_alternatives = {j.source_path.with_suffix(ext) for j in jobs for ext in ('.pvr', '.pkm', '.ktx')}
     files = []
+    total_bytes = largest_file_bytes = 0
     for path in source.rglob('*'):
         if path.is_symlink():
             raise PackageError(f'linked payload is forbidden: {path}')
         if path.is_dir():
             continue
         relative = safe_path(path.relative_to(source).as_posix())
-        if not stat.S_ISREG(path.stat().st_mode) or relative.startswith('__gardendless/'):
+        file_stat = path.stat()
+        if not stat.S_ISREG(file_stat.st_mode) or relative.startswith('__gardendless/'):
             raise PackageError(f'unexpected source payload: {relative}')
         if path.name == '.DS_Store' or relative == 'tauri-dumper.manifest.json' or path in originals or path in legacy_gpu_alternatives:
             continue
@@ -147,7 +148,9 @@ def assemble_package(source: Path, output: Path, texture_map: Path, producer_com
         if path.suffix.lower() == '.astc' and path not in selected_astc:
             raise PackageError(f'unreferenced ASTC file: {relative}')
         files.append((relative, path))
-    if len(files) > MAX_FILES or sum(path.stat().st_size for _, path in files) > MAX_TOTAL_BYTES or any(path.stat().st_size > MAX_FILE_BYTES for _, path in files):
+        total_bytes += file_stat.st_size
+        largest_file_bytes = max(largest_file_bytes, file_stat.st_size)
+    if len(files) > MAX_FILES or total_bytes > MAX_TOTAL_BYTES or largest_file_bytes > MAX_FILE_BYTES:
         raise PackageError('payload exceeds package budgets')
     docs = output / 'docs'
     docs.mkdir(parents=True)
