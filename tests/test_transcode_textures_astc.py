@@ -106,6 +106,16 @@ class TextureTests(unittest.TestCase):
         jobs = discover_jobs(self.args)
         self.assertEqual([j.source_format for j in jobs], ["PNG", "AVIF"])
 
+    def test_native_webp_uses_the_same_astc_pipeline(self):
+        source = self.texture('cc3333', extension='.webp', fmt='WEBP')
+        metadata = self.metadata(source)
+        jobs = discover_jobs(self.args)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].source_format, 'WEBP')
+        self.assertEqual((jobs[0].width, jobs[0].height), (65, 33))
+        self.assertEqual(json.loads(plan_metadata(jobs)[metadata])[0]['fmt'], '7@89')
+        self.assertTrue(source.exists())
+
     def test_vortex_override(self):
         self.texture("201c8e38-0573-4744-a79c-fac86dc60efd", size=(1024, 512))
         job = discover_jobs(self.args)[0]

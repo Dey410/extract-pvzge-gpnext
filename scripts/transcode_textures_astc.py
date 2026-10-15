@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Lite's native AVIF/PNG textures using the compact-150 ASTC policy.
+"""Convert Lite's native AVIF/PNG/WebP textures using the compact-150 ASTC policy.
 
 Original images are retained. Cocos metadata selects only ASTC after every
 output has been validated; originals are not automatic runtime fallbacks.
@@ -181,7 +181,7 @@ def discover_jobs(args: argparse.Namespace) -> list[TextureJob]:
     outputs = set()
     paths = sorted(
         path for path in args.docs_dir.glob("assets/*/native/**/*")
-        if path.is_file() and path.suffix.lower() in (".png", ".avif")
+        if path.is_file() and path.suffix.lower() in (".png", ".avif", ".webp")
     )
     for source in paths:
         astc_path = source.with_suffix(".astc")
@@ -191,8 +191,8 @@ def discover_jobs(args: argparse.Namespace) -> list[TextureJob]:
         # Content detection handles AVIF data stored at a .png path.
         with Image.open(source) as image:
             source_format = image.format
-            if source_format not in ("PNG", "AVIF"):
-                raise AstcError(f"{source}: expected PNG or AVIF, got {source_format}")
+            if source_format not in ("PNG", "AVIF", "WEBP"):
+                raise AstcError(f"{source}: expected PNG, AVIF or WebP, got {source_format}")
             if getattr(image, "n_frames", 1) != 1:
                 raise AstcError(f"{source}: animated images cannot become a single ASTC texture")
             rgba = image.convert("RGBA")
@@ -201,7 +201,7 @@ def discover_jobs(args: argparse.Namespace) -> list[TextureJob]:
             png_data = normalized.getvalue()
             width, height = rgba.size
 
-        # Preserve the original PNG bpp policy. AVIF uses a lossless RGBA PNG
+        # Preserve the original PNG bpp policy. AVIF/WebP use a lossless RGBA PNG
         # of the decoded pixels; AVIF bytes are not comparable to PNG bytes.
         png_size = source.stat().st_size if source_format == "PNG" else len(png_data)
         largest_component = None
@@ -247,7 +247,7 @@ def discover_jobs(args: argparse.Namespace) -> list[TextureJob]:
         if reason == "existing_astc":
             _validate_astc_file(astc_path, jobs[-1])
     if not jobs:
-        raise AstcError(f"no native PNG/AVIF textures found below {args.docs_dir}")
+        raise AstcError(f"no native PNG/AVIF/WebP textures found below {args.docs_dir}")
     return jobs
 
 
@@ -449,11 +449,11 @@ def write_report(args: argparse.Namespace, jobs: list[TextureJob],
         f"Large texture minimum: {args.large_texture_min}px",
         f"Background connected-area threshold: {args.background_component_threshold:g}",
         f"Alpha threshold / analysis size: {args.alpha_threshold} / {args.analysis_size}px",
-        "AVIF classification uses decoded RGBA PNG bytes, not AVIF bytes.",
+        "AVIF/WebP classification uses decoded RGBA PNG bytes, not source compressed bytes.",
         f"Textures: {len(jobs)}",
         f"Existing ASTC reused: {sum(j.reason == 'existing_astc' for j in jobs)}",
         f"New ASTC encoded: {sum(j.reason != 'existing_astc' for j in jobs)}",
-        *[f"Input {fmt}: {sum(j.source_format == fmt for j in jobs)}" for fmt in ("PNG", "AVIF")],
+        *[f"Input {fmt}: {sum(j.source_format == fmt for j in jobs)}" for fmt in ("PNG", "AVIF", "WEBP")],
         *[f"ASTC {block}: {sum(j.block == block for j in jobs)}" for block in ASTC_FORMAT_CODES],
         f"Source bytes (retained): {sum(j.source_bytes for j in jobs)}",
         f"ASTC bytes (total, including reused): {astc_bytes}",
@@ -499,7 +499,7 @@ def byte_value(value: str) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert native PNG/AVIF textures to ASTC, preserving source images."
+        description="Convert native PNG/AVIF/WebP textures to ASTC, preserving source images."
     )
     parser.add_argument("docs_dir", nargs="?", default=Path("docs"), type=Path)
     parser.add_argument(

@@ -7,21 +7,6 @@ on:
         description: "Gzh0821/pvzg_site 的 Release 标签（留空则使用最新非草稿 Release，包含 Pre-release）"
         required: false
 
-      image_transcode_format:
-        description: "图片处理：none=保留原图；astc=将 native AVIF/PNG 转为 ASTC，保留原图并更新元数据（设备需支持 ASTC）"
-        required: true
-        default: none
-        type: choice
-        options:
-          - none
-          - astc
-
-      enable_hybrid_audio_loading:
-        description: "按时长选择音频后端：长音频懒加载 DOM，短音频使用 Web Audio"
-        required: true
-        default: true
-        type: boolean
-
 permissions:
   contents: read
 
@@ -36,6 +21,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Create isolated run output
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ROOT="$(mktemp -d "$RUNNER_TEMP/gardendless-resource.XXXXXX")"
+          {
+            echo "RUN_ROOT=$RUN_ROOT"
+            echo "INPUT_DIR=$RUN_ROOT/input"
+            echo "SOURCE_DOCS=$RUN_ROOT/source-docs"
+            echo "REPORTS=$RUN_ROOT/reports"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUN_ROOT/input" "$RUN_ROOT/reports"
 
       # ============================================================
       # 获取最新 Release 中非 macOS 的 pvzge-lite-*.zip
@@ -52,7 +50,7 @@ jobs:
 
           REPO="Gzh0821/pvzg_site"
 
-          mkdir -p input reports
+          mkdir -p "$INPUT_DIR" "$REPORTS"
 
           RELEASE_TAG="$REQUESTED_RELEASE_TAG"
 
@@ -121,7 +119,7 @@ jobs:
           fi
 
           ASSET_NAME="${ASSET_CANDIDATES[0]}"
-          DOWNLOAD="input/$ASSET_NAME"
+          DOWNLOAD="$INPUT_DIR/$ASSET_NAME"
 
           echo "===== Selected asset ====="
           echo "$ASSET_NAME"
@@ -133,7 +131,7 @@ jobs:
           gh release download "$RELEASE_TAG" \
             --repo "$REPO" \
             --pattern "$ASSET_NAME" \
-            --dir input
+            --dir "$INPUT_DIR"
 
           if [[ ! -s "$DOWNLOAD" ]]; then
             echo "::error::没有下载到有效文件：$DOWNLOAD"
@@ -171,7 +169,7 @@ jobs:
           fi
 
           EXE_ENTRY="${EXE_ENTRIES[0]}"
-          EXE="input/$(basename -- "$EXE_ENTRY")"
+          EXE="$INPUT_DIR/$(basename -- "$EXE_ENTRY")"
 
           echo "===== Extract EXE ====="
           echo "$EXE_ENTRY"
@@ -258,7 +256,7 @@ jobs:
           set -euo pipefail
 
           tauri-dumper verify "$EXE" \
-            2>&1 | tee reports/tauri-verify.txt
+            2>&1 | tee "$REPORTS/tauri-verify.txt"
 
       # ============================================================
       # 列出嵌入资源
@@ -270,11 +268,11 @@ jobs:
           set -euo pipefail
 
           tauri-dumper list "$EXE" \
-            | tee reports/assets-tree.txt
+            | tee "$REPORTS/assets-tree.txt"
 
           tauri-dumper list "$EXE" \
             --json \
-            > reports/assets.json
+            > "$REPORTS/assets.json"
 
       # ============================================================
       # 提取资源
@@ -285,13 +283,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf docs
-          mkdir -p docs
+          mkdir -p "$SOURCE_DOCS"
 
           tauri-dumper extract "$EXE" \
-            -o docs \
-            --overwrite \
-            2>&1 | tee reports/tauri-extract.txt
+            -o "$SOURCE_DOCS" \
+            2>&1 | tee "$REPORTS/tauri-extract.txt"
 
       # ============================================================
       # 检查提取结果
@@ -301,88 +297,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "===== 提取目录大小 ====="
-          du -sh docs
-
-          echo "===== 文件数量 ====="
-          find docs -type f | wc -l
-
-          echo "===== 目标文件与目录 ====="
-
-          find docs \
-            \( \
-              -name "index.html" \
-              -o -name "application.js" \
-              -o -name "assets" \
-              -o -name "src" \
-              -o -name "cocos-js" \
-            \) \
-            -print \
-            | tee reports/target-files.txt
-
-          INDEX_HTML="$(
-            find docs \
-              -type f \
-              -name "index.html" \
-              -print \
-              -quit
-          )"
-
-          if [[ -z "$INDEX_HTML" ]]; then
-            echo "::error::没有找到 index.html"
-            exit 1
-          fi
-
-          echo "===== index.html ====="
-          echo "$INDEX_HTML"
-
-      # ============================================================
-      # 混合音频加载
-      #
-      # 不进行任何音频转码或压缩
-      # ============================================================
-
-      - name: Ensure ffprobe is available
-        if: ${{ inputs.enable_hybrid_audio_loading }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if ! command -v ffprobe >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install --yes --no-install-recommends ffmpeg
-          fi
-
-          ffprobe -version
-
-      - name: Patch runtime for hybrid audio loading
-        if: ${{ inputs.enable_hybrid_audio_loading }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ ! -f scripts/patch_audio_runtime.py ]]; then
-            echo "::error::缺少 scripts/patch_audio_runtime.py"
-            exit 1
-          fi
-
-          python3 scripts/patch_audio_runtime.py \
-            docs \
-            reports/audio-runtime-patch.txt
-
-      # ============================================================
-      # ASTC 纹理转换（参数沿用 compact-150-audio-policy）
-      # ============================================================
+          test -f "$SOURCE_DOCS/index.html"
+          test -f "$SOURCE_DOCS/src/settings.json"
+          test -f "$SOURCE_DOCS/src/import-map.json"
+          test -f "$SOURCE_DOCS/cocos-js/cc.js"
+          cp "$SOURCE_DOCS/tauri-dumper.manifest.json" "$REPORTS/tauri-dumper.manifest.json"
+          du -sh "$SOURCE_DOCS"
 
       - name: Set up Python for ASTC
-        if: ${{ inputs.image_transcode_format == 'astc' }}
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
+      - name: Set up Node for JavaScript parse and execution gates
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Install ASTC tools
-        if: ${{ inputs.image_transcode_format == 'astc' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -393,9 +325,9 @@ jobs:
           ASTCENC_ARCHIVE="astcenc-${ASTCENC_VERSION}-linux-x64.zip"
           ASTCENC_SHA256="4fa262fb4883997b2b38a95c0de3b7ee26d22ac7ab1ebd030558089f2e917502"
           ASTCENC_URL="https://github.com/ARM-software/astc-encoder/releases/download/${ASTCENC_VERSION}/${ASTCENC_ARCHIVE}"
-          ASTCENC_DOWNLOAD="$RUNNER_TEMP/$ASTCENC_ARCHIVE"
-          ASTCENC_EXTRACT="$RUNNER_TEMP/astcenc-$ASTCENC_VERSION"
-          ASTCENC_BIN_DIR="$RUNNER_TEMP/astcenc-bin"
+          ASTCENC_DOWNLOAD="$RUN_ROOT/$ASTCENC_ARCHIVE"
+          ASTCENC_EXTRACT="$RUN_ROOT/astcenc-$ASTCENC_VERSION"
+          ASTCENC_BIN_DIR="$RUN_ROOT/astcenc-bin"
 
           curl --fail --location --proto '=https' --tlsv1.2 \
             --retry 5 --retry-all-errors \
@@ -421,58 +353,42 @@ jobs:
           echo "$ASTCENC_BIN_DIR" >> "$GITHUB_PATH"
           "$ASTCENC_BIN_DIR/astcenc" -version
 
-      - name: Test ASTC conversion
-        if: ${{ inputs.image_transcode_format == 'astc' }}
+      - name: Test core pipeline
         shell: bash
-        run: python3 -m unittest discover -s tests -v
+        run: python3 -m unittest discover -s tests -t . -v
+
+      - name: Patch verified Cocos audio runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m scripts.patch_audio_runtime "$SOURCE_DOCS" "$REPORTS/audio-runtime-patch.json"
 
       - name: Transcode native textures to ASTC
-        if: ${{ inputs.image_transcode_format == 'astc' }}
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/transcode_textures_astc.py \
-            docs reports/astc-texture-summary.txt
+          python3 -m scripts.transcode_textures_astc \
+            "$SOURCE_DOCS" "$REPORTS/astc-texture-summary.txt"
 
-      # ============================================================
-      # 最终信息
-      # ============================================================
-
-      - name: Show final asset information
+      - name: Assemble ASTC package and verify sealed ZIP
         shell: bash
         run: |
           set -euo pipefail
+          python3 -m scripts.resource_package \
+            "$SOURCE_DOCS" "$RUN_ROOT/package" "$REPORTS/astc-texture-map.csv" \
+            --producer-commit "$GITHUB_SHA" --report "$REPORTS/package-build.json"
+          jq -n --arg release "$RELEASE_TAG" --arg asset "$ASSET_NAME" \
+            --arg producer "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            '{releaseTag:$release,sourceAsset:$asset,producerCommit:$producer,runId:$run,tauriDumper:"0.2.2",astcenc:"5.6.0",pillow:"12.1.1"}' \
+            > "$REPORTS/source-build.json"
 
-          echo "===== Release ====="
-          echo "$RELEASE_TAG"
-
-          echo "===== Source asset ====="
-          echo "$ASSET_NAME"
-
-          echo "===== Final docs size ====="
-          du -sh docs
-
-          echo "===== Final file count ====="
-          find docs -type f | wc -l
-
-          echo "===== Reports ====="
-          find reports \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f\n' \
-            | sort
-
-      # ============================================================
-      # 上传 Artifact
-      # ============================================================
-
-      - name: Upload extracted assets
+      - name: Upload verified resource package
         uses: actions/upload-artifact@v4
         with:
-          name: pvzge-lite-${{ steps.download.outputs.release_tag }}
+          name: pvzge-lite-${{ steps.download.outputs.release_tag }}-loader-0.9
           path: |
-            docs/
-            reports/
+            ${{ env.RUN_ROOT }}/package/GardendlessResources.zip
+            ${{ env.REPORTS }}/
           if-no-files-found: error
           retention-days: 7
-          compression-level: 6
+          compression-level: 0
