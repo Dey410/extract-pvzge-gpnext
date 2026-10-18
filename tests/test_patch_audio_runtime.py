@@ -26,7 +26,11 @@ class PatchDocsTests(unittest.TestCase):
         engine.write_text(ENGINE)
         patch_docs(root, root / 'reports' / 'audio.json')
         self.assertIn('__pvzgeMusicPaths', engine.read_text())
-        self.assertIn('music UUIDs', (root / 'reports' / 'audio.json').read_text())
+        report = json.loads((root / 'reports' / 'audio.json').read_text())
+        self.assertIn('decode-on-play', report['policy'])
+        self.assertEqual(report['audioContextSampleRate'], 32000)
+        self.assertEqual(report['musicPcmCacheBytes'], 32 * 1024 * 1024)
+        self.assertEqual(report['musicPaths'], ['assets/resources/native/fc/fc991dd7-0033-4b80-9d41-c8a86a702e59.mp3'])
 
     def test_unknown_engine_layout_fails_explicitly(self):
         with self.assertRaises(PatchError):

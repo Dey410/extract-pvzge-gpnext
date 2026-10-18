@@ -14,17 +14,32 @@ class PatchError(RuntimeError):
     pass
 
 
+AUDIO_CONTEXT_SAMPLE_RATE = 32000
+MUSIC_PCM_CACHE_BYTES = 32 * 1024 * 1024
+MUSIC_PLAYER_SOURCE = (Path(__file__).parent / 'music_player.js').read_text(encoding='utf-8')
 AUDIO_EXTENSIONS = frozenset({'.aac', '.flac', '.m4a', '.mp3', '.oga', '.ogg', '.opus', '.wav'})
 IDENT = r'[A-Za-z_$][\w$]*'
-DOM_LOADER_PATTERN = re.compile(
-    rf'(?P<head>{IDENT}\.loadNative=function\((?P<url>{IDENT})\)\{{return new Promise\(\(function\((?P<resolve>{IDENT}),(?P<reject>{IDENT})\)\{{)'
-    rf'var (?P<audio>{IDENT})=document\.createElement\("audio"\).*?'
-    r'(?P=audio)\.src=(?P=url)\}\)\)\}(?=,[A-Za-z_$][\w$]*\.loadOneShotAudio=function)', re.DOTALL,
-)
-HYBRID_SELECTOR_PATTERN = re.compile(
+MUSIC_SELECTOR_PATTERN = re.compile(
     rf'\(null==(?P<option>{IDENT})\?void 0:(?P=option)\.audioLoadMode\)'
     rf'!==(?P<enum>{IDENT})\.DOM_AUDIO&&(?P<support>{IDENT}\.support)'
-    rf'(?=\?{IDENT}\.load(?:Native|OneShotAudio)?\((?P<url>{IDENT}))'
+    rf'\?(?P<web>{IDENT})\.(?P<method>loadNative|loadOneShotAudio|load)\((?P<url>{IDENT})'
+)
+WEB_PLAYER_PATTERN = re.compile(
+    rf'(?P<web>{IDENT})=\({IDENT}\(\((?P<inner>{IDENT})=function\(\)\{{function t\(t,e\)\{{'
+    r'this\._src=void 0,this\._audioBuffer=void 0,.*?'
+    r'Object\.getOwnPropertyDescriptor\((?P=inner)\.prototype,"stop"\),(?P=inner)\.prototype\),(?P=inner)\)'
+    rf'(?=,{IDENT}=function\(\)\{{function t\(t\)\{{this\._audio=void 0)', re.DOTALL,
+)
+WEB_PLAYER_DEPS = {
+    'agent': re.compile(rf'this\._gainNode=(?P<name>{IDENT})\.createGain\(\)'),
+    'states': re.compile(rf'this\._state=(?P<name>{IDENT})\.INIT'),
+    'events': re.compile(rf'\.emit\((?P<name>{IDENT})\.ENDED\)'),
+    'types': re.compile(rf'return (?P<name>{IDENT})\.WEB_AUDIO'),
+    'bus': re.compile(rf'(?P<name>{IDENT})\.on\({IDENT}\.EVENT_PAUSE,this\._onInterruptedBegin,this\)'),
+    'busEvents': re.compile(rf'{IDENT}\.on\((?P<name>{IDENT})\.EVENT_PAUSE,this\._onInterruptedBegin,this\)'),
+}
+CONTEXT_PATTERN = re.compile(
+    r'this\._context=new\(window\.AudioContext\|\|window\.webkitAudioContext\|\|window\.mozAudioContext\)'
 )
 DECODE_CALLBACK_PATTERN = re.compile(
     rf'(?P<head>{IDENT}\.decodeAudioData=function\({IDENT}\)\{{var {IDENT}=this;return new Promise\(\(function\({IDENT},(?P<reject>{IDENT})\)\{{.*?'
@@ -94,17 +109,28 @@ def music_audio_paths(docs_dir: Path) -> list[str]:
     return sorted(music)
 
 
-def render_audio_selector(paths: list[str]) -> str:
+def render_audio_runtime(paths: list[str]) -> str:
     return (
         'var __pvzgeMusicPaths=new Set('
         + json.dumps(sorted(paths), separators=(',', ':'))
-        + ');function __pvzgeUseWebAudio(u,o,d,w,s){'
-        'var m=o&&o.audioLoadMode;if(m===d)return!1;'
+        + ');function __pvzgeIsMusic(u){'
         'var p=decodeURIComponent(new URL(u,document.baseURI).pathname).replace(/^\\/+/,"");'
-        'var a=p.indexOf("assets/");if(a>=0)p=p.slice(a);'
-        'var web=m===w||!__pvzgeMusicPaths.has(p);'
-        'if(web&&!s)throw new Error("Web Audio unavailable");return web}'
+        'var a=p.indexOf("assets/");if(a>=0)p=p.slice(a);return __pvzgeMusicPaths.has(p)}'
+        'function __pvzgeUseWebAudio(u,o,d,s){if(__pvzgeIsMusic(u)){'
+        'if(!s)throw new Error("Web Audio unavailable");return!0}'
+        'return(null==o?void 0:o.audioLoadMode)!==d&&s}\n'
+        + MUSIC_PLAYER_SOURCE
     )
+
+
+def web_player_deps(source: str) -> dict[str, str]:
+    deps = {}
+    for key, pattern in WEB_PLAYER_DEPS.items():
+        names = {match['name'] for match in pattern.finditer(source)}
+        if len(names) != 1:
+            raise PatchError(f'unexpected Cocos WebAudio player dependency {key}: {sorted(names)}')
+        deps[key] = names.pop()
+    return deps
 
 
 def check_javascript(source: str) -> None:
@@ -114,25 +140,23 @@ def check_javascript(source: str) -> None:
 
 
 def patch_engine_source(source: str, music_paths: list[str]) -> tuple[str, dict[str, int]]:
-    def loader(match):
-        a, u, ok, fail = (match.group(k) for k in ('audio', 'url', 'resolve', 'reject'))
+    web_players = set()
+    def selector(match):
+        web_players.add(match['web'])
+        target = f'(__pvzgeIsMusic({match["url"]})?__pvzgeMusic:{match["web"]})' if match['method'] == 'load' else match['web']
         return (
-            match['head'] + f'var {a}=document.createElement("audio"),done=!1,timer;'
-            'function cleanup(){clearTimeout(timer);'
-            f'{a}.removeEventListener("loadedmetadata",ready),{a}.removeEventListener("error",bad),{a}.removeEventListener("abort",bad)}}'
-            f'function finish(error){{if(done)return;done=!0;cleanup();error?{fail}(error):{ok}({a})}}'
-            f'function ready(){{if({a}.readyState>=1&&Number.isFinite({a}.duration))finish()}}'
-            f'function bad(){{finish(new Error("load audio failed: "+{u}))}}'
-            f'{a}.preload="metadata",{a}.addEventListener("loadedmetadata",ready),'
-            f'{a}.addEventListener("error",bad),{a}.addEventListener("abort",bad);'
-            'timer=setTimeout(bad,8e3);'
-            f'try{{{a}.src={u},{a}.load(),ready()}}catch(error){{finish(error)}}'
-            '}))}'
+            f'(__pvzgeUseWebAudio({match["url"]},{match["option"]},{match["enum"]}.DOM_AUDIO,{match["support"]}))'
+            f'?{target}.{match["method"]}({match["url"]}'
         )
-    patched, dom_count = DOM_LOADER_PATTERN.subn(loader, source)
-    patched, selector_count = HYBRID_SELECTOR_PATTERN.subn(
-        lambda m: f'(__pvzgeUseWebAudio({m["url"]},{m["option"]},{m["enum"]}.DOM_AUDIO,{m["enum"]}.WEB_AUDIO,{m["support"]}))', patched,
-    )
+    patched, selector_count = MUSIC_SELECTOR_PATTERN.subn(selector, source)
+    def music_player(match):
+        web_players.add(match['web'])
+        deps = ','.join(f'{key}:{name}' for key, name in web_player_deps(match.group(0)).items())
+        return match.group(0) + f',__pvzgeMusic=__pvzgeCreateMusicPlayer(function(){{return{{{deps}}}}},{MUSIC_PCM_CACHE_BYTES})'
+    patched, player_count = WEB_PLAYER_PATTERN.subn(music_player, patched)
+    if len(web_players) > 1:
+        raise PatchError(f'audio selectors and music player name different WebAudio players: {sorted(web_players)}')
+    patched, context_count = CONTEXT_PATTERN.subn(lambda m: m.group(0) + f'({{sampleRate:{AUDIO_CONTEXT_SAMPLE_RATE}}})', patched)
     patched, callback_count = DECODE_CALLBACK_PATTERN.subn(lambda m: m['head'] + f'{m["reject"]}({m["error"]})', patched)
     decode_count = 0
     def web_loader(match):
@@ -144,17 +168,13 @@ def patch_engine_source(source: str, music_paths: list[str]) -> tuple[str, dict[
         decode_count += count
         return match['head'] + body
     patched = WEB_LOADER_PATTERN.sub(web_loader, patched)
-    destroy_old = 'this._domAudio.removeEventListener("ended",this._onEnded),this._domAudio=null'
-    destroy_count = patched.count(destroy_old)
-    patched = patched.replace(destroy_old,
-        'this._domAudio.pause(),this._domAudio.removeAttribute("src"),this._domAudio.load(),'
-        + destroy_old)
     patched, one_shot_count = ONE_SHOT_PATTERN.subn(patch_one_shot, patched)
-    changes = {'one_shot': one_shot_count, 'dom_loader': dom_count, 'hybrid_selector': selector_count,
-               'decode_callback': callback_count, 'decode_rejection': decode_count, 'dom_destroy': destroy_count}
-    if changes != {'one_shot': 1, 'dom_loader': 1, 'hybrid_selector': 3, 'decode_callback': 1, 'decode_rejection': 1, 'dom_destroy': 1}:
+    changes = {'one_shot': one_shot_count, 'music_selector': selector_count, 'music_player': player_count,
+               'context_sample_rate': context_count, 'decode_callback': callback_count, 'decode_rejection': decode_count}
+    if changes != {'one_shot': 1, 'music_selector': 3, 'music_player': 1, 'context_sample_rate': 1,
+                   'decode_callback': 1, 'decode_rejection': 1}:
         raise PatchError(f'unexpected Cocos audio runtime layout: {changes}')
-    helper = render_audio_selector(music_paths)
+    helper = render_audio_runtime(music_paths)
     strict = next((v for v in ('"use strict";', "'use strict';") if patched.startswith(v)), '')
     patched = strict + helper + patched[len(strict):]
     check_javascript(patched)
@@ -180,10 +200,13 @@ def patch_docs(docs_dir: Path, report_path: Path) -> None:
     engine.write_text(patched, encoding='utf-8', newline='')
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps({
-        'policy': 'explicit mode, otherwise resources music UUIDs DOM / effects WebAudio',
+        'policy': 'resources music UUIDs use the decode-on-play WebAudio music player; '
+                  'other audio keeps the Cocos rule; WebAudio context at a fixed sample rate',
         'engine': engine.relative_to(docs_dir).as_posix(), 'changes': changes,
         'engineSha256Before': hashlib.sha256(before).hexdigest(),
         'engineSha256After': hashlib.sha256(patched.encode()).hexdigest(),
+        'audioContextSampleRate': AUDIO_CONTEXT_SAMPLE_RATE,
+        'musicPcmCacheBytes': MUSIC_PCM_CACHE_BYTES,
         'musicPaths': music,
     }, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 

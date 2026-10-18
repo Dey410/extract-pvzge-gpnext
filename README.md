@@ -10,11 +10,27 @@ Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目�
 元数据备份及已被 ASTC 替代的 PVR/PKM 保留在构建源目录或 reports 中，不进入正式资源 ZIP，不用删除源文件来减包。
 每次构建使用全新的 run 输出目录。
 
-音频只使用游戏自带的 DOM Audio / WebAudio。显式 `audioLoadMode` 优先；没有显式模式时，
-`assets/resources/config.json` 的 `music/` AudioClip UUID 映射决定音乐走 DOM，其他音效走 WebAudio。
-不再逐文件 ffprobe 或按十秒阈值分流。DOM 等待有效 metadata，错误、abort、八秒超时均拒绝；
+音频全部走 WebAudio，不再创建 `<audio>`。原因：
+- iOS 卡顿：游戏每帧都给音乐设置 `playbackRate`，Cocos 的 DOM 播放器每次都重写 `preservesPitch` 和
+  `playbackRate`，WebKit 因此每帧向 GPU 进程发 IPC 并重设 AVPlayer，画面跟着卡。
+- BGM 丢失：游戏靠当前音乐的 `currentTime` 切下一首。DOM 元素加载失败或被系统暂停后，Cocos 不会恢复，
+  时间不再前进，整关不再有 BGM。
+- iPhone 上 WebKit 锁定媒体元素音量，游戏的音乐音量和暂停静音不起作用。
+
+`assets/resources/config.json` 中 `music/` AudioClip UUID 对应的音乐，由 `scripts/music_player.js`
+提供的播放器播放（`AudioPlayer.load` 遇到音乐时，忽略调用方显式指定的模式）：
+- 载入时不读文件、不解码，所以沙盒模式一次载入两百多首音乐也不占内存。
+- 第一次播放时取文件并解码，同一首按 URL 共享。`stop`/`destroy` 后放入 32 MiB 的 LRU，超出时淘汰最早释放的。
+- 播放时钟从请求播放时开始按 `AudioContext.currentTime × playbackRate` 推进，解码完成后从当前位置接入。
+  首次播放会损失解码耗时那一小段开头，但切歌时机不变。
+- 解码失败只记一次错误，时钟照常走，游戏仍会按时切到下一首。
+- 速率和音量只在值变化时写；结束用实际 `onended`；中断沿用 Cocos 的 pause/resume 事件。
+
+音乐的 one-shot 和 `loadNative`，以及其他音频，使用游戏自带的 WebAudio。其他音频保留 Cocos 原本的显式模式规则。
+AudioContext 固定为 32 kHz：约 85% 的音效时长、48% 的音乐时长原本就不高于 32 kHz，
+解码后的 PCM 比按 48 kHz 硬件采样率解码少三分之一。
 WebAudio decode 失败会传给外层 Promise。one-shot 通过实际 `onended` 结算播放、释放源节点和 Gain，
-不会用原始时长计时器猜测变速后的结束时间。此修改经过隔离 JS 执行验证，仍需设备验收实际媒体播放。
+不会用原始时长计时器猜测变速后的结束时间。播放器经过隔离 JS 执行验证，仍需设备验收实际播放。
 目前仅接受已核对布局的 Cocos 3.8.4；不自动尝试其它播放器或引擎布局。
 
 ASTC 固定采用 `astcenc 5.6.0 -cl -fast`，每编码进程一个线程。规则保持：
