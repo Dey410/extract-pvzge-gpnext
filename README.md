@@ -29,10 +29,9 @@ Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目�
 - 等待上下文时和引擎的 one-shot 一样走 `runContext()`：它检查 AudioContext 的实际状态并调用 `resume()`，
   不依赖可能漏发的 statechange 事件。
 
-iOS WebKit 在页面只播 WebAudio 时使用 AmbientSound 音频会话，有 `<audio>` 在播时使用 MediaPlayback。
-音乐改走 WebAudio 后，iPad 从后台回来时 AudioContext 显示 running 但时钟停止。`scripts/audio_context.js`
-在引擎创建 AudioContext 之前设置 `navigator.audioSession.type = "playback"`，保持之前 DOM 音乐时的会话类别；
-游戏重新显示时把 AudioContext 的 `state`、`currentTime` 以及一秒后时钟是否前进以 `[pvzge-audio]` 警告写入日志。
+`scripts/audio_context.js` 在游戏重新显示时把 AudioContext 的 `state`、`currentTime` 以及一秒后时钟
+是否前进以 `[pvzge-audio]` 警告写入日志。iPad 上切换应用回来后，上下文会停在 interrupted，或显示 running
+但时钟不走；这是 iOS 宿主的问题，旧包同样存在，资源包里不做挂起/恢复或音频会话类型的绕行。
 
 音乐的 one-shot 和 `loadNative` 使用游戏自带的 WebAudio；其他 one-shot 保留 Cocos 原本的显式模式规则，游戏设置里的音效加载方式照常生效。
 AudioContext 固定为 32 kHz：约 85% 的音效时长、48% 的音乐时长原本就不高于 32 kHz，

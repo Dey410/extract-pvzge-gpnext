@@ -1,22 +1,6 @@
-// iOS WebKit uses the AmbientSound audio session while a page plays only Web
-// Audio and MediaPlayback while an <audio> element plays. With music moved off
-// <audio>, an iPad came back from the background with the AudioContext
-// "running" but its clock stopped. Requesting the playback session keeps the
-// category the game had with DOM music; it must be set before the engine
-// creates its AudioContext.
-function __pvzgeUsePlaybackAudioSession() {
-  "use strict";
-  var session = typeof navigator !== "undefined" ? navigator.audioSession : undefined;
-  if (!session) {
-    console.warn("[pvzge-audio] audio session API unavailable");
-    return;
-  }
-  session.type = "playback";
-  console.warn("[pvzge-audio] audio session type=" + session.type);
-}
-
-// Logs the AudioContext state when the game is shown again, and whether its
-// clock advances a second later.
+// Logs the AudioContext state when the game is shown again and whether its
+// clock advances a second later. On the iPad host the context has come back
+// "interrupted", or "running" with a stopped clock, after an app switch.
 function __pvzgeReportAudioContextOnShow(deps) {
   "use strict";
   if (!deps.agent) return;

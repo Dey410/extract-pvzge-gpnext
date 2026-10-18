@@ -20,14 +20,6 @@ class AudioContextTests(unittest.TestCase):
         result = subprocess.run(['node', '-'], input=program, text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_requests_the_playback_audio_session(self):
-        self.run_js('''__pvzgeUsePlaybackAudioSession();assert.equal(navigator.audioSession.type,'playback');
-assert.deepEqual(warnings,['[pvzge-audio] audio session type=playback']);''', 'Object.defineProperty(globalThis,"navigator",{value:{audioSession:{type:"auto"}},configurable:true});')
-
-    def test_reports_when_the_audio_session_api_is_missing(self):
-        self.run_js('''__pvzgeUsePlaybackAudioSession();assert.deepEqual(warnings,['[pvzge-audio] audio session API unavailable']);''',
-                    'Object.defineProperty(globalThis,"navigator",{value:{},configurable:true});')
-
     def test_show_reports_state_and_whether_the_clock_advances(self):
         self.run_js('''__pvzgeReportAudioContextOnShow({agent:{_context:context},bus,busEvents:{EVENT_SHOW:'show'}});
 handlers.show();assert.equal(warnings[0],'[pvzge-audio] show state=running time=1.000');

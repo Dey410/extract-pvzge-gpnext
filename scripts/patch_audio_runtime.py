@@ -123,7 +123,6 @@ def render_audio_runtime(paths: list[str]) -> str:
         'if(!s)throw new Error("Web Audio unavailable");return!0}'
         'return(null==o?void 0:o.audioLoadMode)!==d&&s}\n'
         + MUSIC_PLAYER_SOURCE + AUDIO_CONTEXT_SOURCE
-        + '__pvzgeUsePlaybackAudioSession();\n'
     )
 
 
@@ -214,7 +213,7 @@ def patch_docs(docs_dir: Path, report_path: Path) -> None:
     report_path.write_text(json.dumps({
         'policy': 'AudioSource loads of resources music UUIDs or explicit DOM_AUDIO use the decode-on-play '
                   'WebAudio player; music one-shots use WebAudio; other audio keeps the Cocos rule; '
-                  'WebAudio context at a fixed sample rate; playback audio session requested',
+                  'WebAudio context at a fixed sample rate',
         'engine': engine.relative_to(docs_dir).as_posix(), 'changes': changes,
         'engineSha256Before': hashlib.sha256(before).hexdigest(),
         'engineSha256After': hashlib.sha256(patched.encode()).hexdigest(),
