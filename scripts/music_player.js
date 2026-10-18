@@ -1,5 +1,6 @@
-// Cocos 3.8.4 audio player for music AudioClips. Loading a clip reads and
-// decodes nothing; a track is decoded when it first plays and shared by URL.
+// Cocos 3.8.4 audio player for music and for clips the game asks to stream
+// (DOM_AUDIO). Loading a clip reads and decodes nothing; a track is decoded
+// when it first plays and shared by URL.
 // The play clock runs from the play request at the playback rate, so the game,
 // which switches tracks on currentTime, stays on time while a track decodes
 // or after one fails to decode.

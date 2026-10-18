@@ -27,7 +27,7 @@ class PatchDocsTests(unittest.TestCase):
         patch_docs(root, root / 'reports' / 'audio.json')
         self.assertIn('__pvzgeMusicPaths', engine.read_text())
         report = json.loads((root / 'reports' / 'audio.json').read_text())
-        self.assertIn('decode-on-play', report['policy'])
+        self.assertIn('explicit DOM_AUDIO use the decode-on-play', report['policy'])
         self.assertEqual(report['audioContextSampleRate'], 32000)
         self.assertEqual(report['musicPcmCacheBytes'], 32 * 1024 * 1024)
         self.assertEqual(report['musicPaths'], ['assets/resources/native/fc/fc991dd7-0033-4b80-9d41-c8a86a702e59.mp3'])

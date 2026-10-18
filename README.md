@@ -17,8 +17,9 @@ Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目�
   时间不再前进，整关不再有 BGM。
 - iPhone 上 WebKit 锁定媒体元素音量，游戏的音乐音量和暂停静音不起作用。
 
-`assets/resources/config.json` 中 `music/` AudioClip UUID 对应的音乐，由 `scripts/music_player.js`
-提供的播放器播放（`AudioPlayer.load` 遇到音乐时，忽略调用方显式指定的模式）：
+`AudioPlayer.load`（AudioSource 和资源下载走这条路径）遇到下面两类音频时，交给 `scripts/music_player.js`
+提供的播放器：`assets/resources/config.json` 中 `music/` AudioClip UUID 对应的音乐（无论调用方显式指定什么模式），
+以及游戏显式要求 DOM_AUDIO 的音频（环境音、僵尸和僵王的循环音、禅境花园和世界地图音乐等）。这个播放器：
 - 载入时不读文件、不解码，所以沙盒模式一次载入两百多首音乐也不占内存。
 - 第一次播放时取文件并解码，同一首按 URL 共享。`stop`/`destroy` 后放入 32 MiB 的 LRU，超出时淘汰最早释放的。
 - 播放时钟从请求播放时开始按 `AudioContext.currentTime × playbackRate` 推进，解码完成后从当前位置接入。
@@ -26,7 +27,7 @@ Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目�
 - 解码失败只记一次错误，时钟照常走，游戏仍会按时切到下一首。
 - 速率和音量只在值变化时写；结束用实际 `onended`；中断沿用 Cocos 的 pause/resume 事件。
 
-音乐的 one-shot 和 `loadNative`，以及其他音频，使用游戏自带的 WebAudio。其他音频保留 Cocos 原本的显式模式规则。
+音乐的 one-shot 和 `loadNative` 使用游戏自带的 WebAudio；其他 one-shot 保留 Cocos 原本的显式模式规则，游戏设置里的音效加载方式照常生效。
 AudioContext 固定为 32 kHz：约 85% 的音效时长、48% 的音乐时长原本就不高于 32 kHz，
 解码后的 PCM 比按 48 kHz 硬件采样率解码少三分之一。
 WebAudio decode 失败会传给外层 Promise。one-shot 通过实际 `onended` 结算播放、释放源节点和 Gain，

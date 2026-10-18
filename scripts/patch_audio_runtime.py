@@ -116,7 +116,9 @@ def render_audio_runtime(paths: list[str]) -> str:
         + ');function __pvzgeIsMusic(u){'
         'var p=decodeURIComponent(new URL(u,document.baseURI).pathname).replace(/^\\/+/,"");'
         'var a=p.indexOf("assets/");if(a>=0)p=p.slice(a);return __pvzgeMusicPaths.has(p)}'
-        'function __pvzgeUseWebAudio(u,o,d,s){if(__pvzgeIsMusic(u)){'
+        'function __pvzgeDecodesOnPlay(u,o,d){return __pvzgeIsMusic(u)||(null==o?void 0:o.audioLoadMode)===d}'
+        'function __pvzgeUseWebAudio(u,o,d,s,load){'
+        'if(load?__pvzgeDecodesOnPlay(u,o,d):__pvzgeIsMusic(u)){'
         'if(!s)throw new Error("Web Audio unavailable");return!0}'
         'return(null==o?void 0:o.audioLoadMode)!==d&&s}\n'
         + MUSIC_PLAYER_SOURCE
@@ -143,10 +145,12 @@ def patch_engine_source(source: str, music_paths: list[str]) -> tuple[str, dict[
     web_players = set()
     def selector(match):
         web_players.add(match['web'])
-        target = f'(__pvzgeIsMusic({match["url"]})?__pvzgeMusic:{match["web"]})' if match['method'] == 'load' else match['web']
+        url, option, dom = match['url'], match['option'], f'{match["enum"]}.DOM_AUDIO'
+        load = match['method'] == 'load'
+        target = f'(__pvzgeDecodesOnPlay({url},{option},{dom})?__pvzgeMusic:{match["web"]})' if load else match['web']
         return (
-            f'(__pvzgeUseWebAudio({match["url"]},{match["option"]},{match["enum"]}.DOM_AUDIO,{match["support"]}))'
-            f'?{target}.{match["method"]}({match["url"]}'
+            f'(__pvzgeUseWebAudio({url},{option},{dom},{match["support"]},{"!0" if load else "!1"}))'
+            f'?{target}.{match["method"]}({url}'
         )
     patched, selector_count = MUSIC_SELECTOR_PATTERN.subn(selector, source)
     def music_player(match):
@@ -200,8 +204,9 @@ def patch_docs(docs_dir: Path, report_path: Path) -> None:
     engine.write_text(patched, encoding='utf-8', newline='')
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps({
-        'policy': 'resources music UUIDs use the decode-on-play WebAudio music player; '
-                  'other audio keeps the Cocos rule; WebAudio context at a fixed sample rate',
+        'policy': 'AudioSource loads of resources music UUIDs or explicit DOM_AUDIO use the decode-on-play '
+                  'WebAudio player; music one-shots use WebAudio; other audio keeps the Cocos rule; '
+                  'WebAudio context at a fixed sample rate',
         'engine': engine.relative_to(docs_dir).as_posix(), 'changes': changes,
         'engineSha256Before': hashlib.sha256(before).hexdigest(),
         'engineSha256After': hashlib.sha256(patched.encode()).hexdigest(),

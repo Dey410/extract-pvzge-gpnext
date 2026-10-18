@@ -45,18 +45,21 @@ RUNTIME
         result = subprocess.run(['node', '-'], input=program, text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_music_always_uses_web_audio_and_load_gets_the_music_player(self):
+    def test_music_and_explicit_dom_loads_get_the_decode_on_play_player(self):
         self.run_js('''const music='assets/resources/native/aa/music.mp3';
 for(const url of [music,'https://game/'+music]){for(const options of [undefined,{audioLoadMode:0},{audioLoadMode:1}]){
 assert.ok(await W9.load(url,options) instanceof __pvzgeMusic);
 assert.equal(await W9.loadNative(url,options),'web');
 assert.equal(await W9.loadOneShotAudio(url,1,options),'web');}}
-assert.equal(await W9.load('short.mp3',{audioLoadMode:0}),'dom');
+assert.ok(await W9.load('loop.m4a',{audioLoadMode:0}) instanceof __pvzgeMusic);
 assert.equal(await W9.load('short.mp3'),'web');
+assert.equal(await W9.load('short.mp3',{audioLoadMode:1}),'web');
 assert.equal(await W9.loadNative('short.mp3',{audioLoadMode:0}),'dom');
+assert.equal(await W9.loadOneShotAudio('short.mp3',1,{audioLoadMode:0}),'dom');
 assert.equal(await W9.loadOneShotAudio('short.mp3',1),'web');
 E9.support=false;
 assert.throws(()=>W9.load(music),/Web Audio unavailable/);
+assert.throws(()=>W9.load('loop.m4a',{audioLoadMode:0}),/Web Audio unavailable/);
 assert.equal(await W9.load('short.mp3'),'dom');''')
 
     def test_music_player_uses_the_engine_web_player_dependencies(self):
