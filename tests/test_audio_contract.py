@@ -25,7 +25,10 @@ var C9={getCache:()=>null,addCache:()=>{},retainCache:()=>{}};
 var T9={decodeAudioData:()=>Promise.reject(new Error('bad decode'))};
 var z=()=>{};
 var Web={};Web.loadNative=function(t){return new Promise((function(e,i){var n=C9.getCache(t);if(n)return C9.retainCache(t),void e(n);var r=new XMLHttpRequest,s="load audio failed: "+t+", status: ";r.open("GET",t,!0),r.responseType="arraybuffer",r.onload=function(){200===r.status||0===r.status?T9.decodeAudioData(r.response).then((function(i){C9.addCache(t,i),e(i)})).catch((function(e){z("loadNative error",t,e)})):i(new Error(""+s+r.status+"(no response)"))},r.onerror=function(){i(new Error(""+s+r.status+"(error)"))},r.ontimeout=function(){i(new Error(""+s+r.status+"(time out)"))},r.onabort=function(){i(new Error(""+s+r.status+"(abort)"))},r.send(null)}))};
-var Decoder=function(){};var e=Decoder.prototype;
+var Agent=function(){this.waiters=[]};var e=Agent.prototype;
+e.onceRunning=function(t,e){this.waiters.push(t)};
+e.runContext=function(){var t=this;return new Promise((function(e){if(t.isRunning)e();else{var i=t._context;if(i.resume)if(i.resume().catch((function(t){z("runContext error",t)})),"running"!==i.state){var n=document.getElementById("GameCanvas"),r=function t(){i.resume().then((function(){null==n||n.removeEventListener("touchend",t,{capture:!0}),null==n||n.removeEventListener("mouseup",t,{capture:!0}),e()})).catch((function(t){z("onGesture resume error",t)}))};null==n||n.addEventListener("touchend",r,{capture:!0}),null==n||n.addEventListener("mouseup",r,{capture:!0})}else e();else e()}}))};
+var Decoder=function(){};e=Decoder.prototype;
 e.decodeAudioData=function(t){var e=this;return new Promise((function(i,n){var r=e._context.decodeAudioData(t,(function(t){i(t)}),(function(t){console.error("failed to load Web Audio",t)}));null==r||r.catch(n)}))};
 '''
 ENGINE = DOM_LOADER + ';' + PRELUDE + DECODE + WEB_PLAYER + SELECTORS + CONTEXT + ONE_SHOT
@@ -67,6 +70,12 @@ assert.equal(await W9.load('short.mp3'),'dom');''')
 assert.equal(player.state,l9.INIT);assert.equal(player.type,s9.WEB_AUDIO);
 assert.deepEqual(EB.calls.map(call=>call[0]),['show','pause','resume']);
 assert.deepEqual(EB.calls.slice(1).map(call=>call[2]),[player,player]);''')
+
+    def test_run_context_settles_when_the_context_starts_running_without_a_tap(self):
+        self.run_js('''const agent=new Agent();agent.isRunning=false;agent._context={state:'suspended',resume:()=>Promise.resolve()};
+let settled=false;document.getElementById=()=>({addEventListener(){},removeEventListener(){}});
+agent.runContext().then(()=>settled=true);await Promise.resolve();assert.equal(settled,false);
+assert.equal(agent.waiters.length,1);agent.waiters[0]();await Promise.resolve();assert.equal(settled,true);''')
 
     def test_audio_context_uses_fixed_sample_rate(self):
         self.run_js('''let options;globalThis.window={AudioContext:class{constructor(value){options=value}}};

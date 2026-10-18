@@ -29,9 +29,11 @@ Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目�
 - 等待上下文时和引擎的 one-shot 一样走 `runContext()`：它检查 AudioContext 的实际状态并调用 `resume()`，
   不依赖可能漏发的 statechange 事件。
 
+Cocos 的 `runContext()` 在上下文未运行时只会等下一次点击画布才放行；补丁让它在上下文恢复运行时也放行，
+这样切换应用回来、宿主恢复 AudioContext 后，one-shot 和音乐无需点击即可继续。挂起与恢复的时机由 iOS 宿主
+（GardendlessLoader 的 `audio_lifecycle.js`）按场景活跃状态处理，资源包里不做挂起/恢复或音频会话类型的绕行。
 `scripts/audio_context.js` 在游戏重新显示时把 AudioContext 的 `state`、`currentTime` 以及一秒后时钟
-是否前进以 `[pvzge-audio]` 警告写入日志。iPad 上切换应用回来后，上下文会停在 interrupted，或显示 running
-但时钟不走；这是 iOS 宿主的问题，旧包同样存在，资源包里不做挂起/恢复或音频会话类型的绕行。
+是否前进以 `[pvzge-audio]` 警告写入日志。
 
 音乐的 one-shot 和 `loadNative` 使用游戏自带的 WebAudio；其他 one-shot 保留 Cocos 原本的显式模式规则，游戏设置里的音效加载方式照常生效。
 AudioContext 固定为 32 kHz：约 85% 的音效时长、48% 的音乐时长原本就不高于 32 kHz，

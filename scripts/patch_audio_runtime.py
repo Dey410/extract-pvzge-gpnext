@@ -42,6 +42,12 @@ WEB_PLAYER_DEPS = {
 CONTEXT_PATTERN = re.compile(
     r'this\._context=new\(window\.AudioContext\|\|window\.webkitAudioContext\|\|window\.mozAudioContext\)'
 )
+# Cocos only settles runContext() on the next tap once the context is not
+# running; it also has to settle when the context starts running again.
+RUN_CONTEXT_PATTERN = re.compile(
+    rf'(?P<head>{IDENT}\.runContext=function\(\)\{{var (?P<agent>{IDENT})=this;return new Promise\(\(function\((?P<resolve>{IDENT})\)\{{'
+    r'if\((?P=agent)\.isRunning\)(?P=resolve)\(\);else\{)'
+)
 DECODE_CALLBACK_PATTERN = re.compile(
     rf'(?P<head>{IDENT}\.decodeAudioData=function\({IDENT}\)\{{var {IDENT}=this;return new Promise\(\(function\({IDENT},(?P<reject>{IDENT})\)\{{.*?'
     rf'\(function\((?P<error>{IDENT})\)\{{)console\.error\("failed to load Web Audio",(?P=error)\)', re.DOTALL,
@@ -168,6 +174,8 @@ def patch_engine_source(source: str, music_paths: list[str]) -> tuple[str, dict[
     if len(web_players) > 1:
         raise PatchError(f'audio selectors and music player name different WebAudio players: {sorted(web_players)}')
     patched, context_count = CONTEXT_PATTERN.subn(lambda m: m.group(0) + f'({{sampleRate:{AUDIO_CONTEXT_SAMPLE_RATE}}})', patched)
+    patched, run_context_count = RUN_CONTEXT_PATTERN.subn(
+        lambda m: m['head'] + f'{m["agent"]}.onceRunning({m["resolve"]});', patched)
     patched, callback_count = DECODE_CALLBACK_PATTERN.subn(lambda m: m['head'] + f'{m["reject"]}({m["error"]})', patched)
     decode_count = 0
     def web_loader(match):
@@ -181,9 +189,10 @@ def patch_engine_source(source: str, music_paths: list[str]) -> tuple[str, dict[
     patched = WEB_LOADER_PATTERN.sub(web_loader, patched)
     patched, one_shot_count = ONE_SHOT_PATTERN.subn(patch_one_shot, patched)
     changes = {'one_shot': one_shot_count, 'music_selector': selector_count, 'music_player': player_count,
-               'context_sample_rate': context_count, 'decode_callback': callback_count, 'decode_rejection': decode_count}
+               'context_sample_rate': context_count, 'run_context': run_context_count,
+               'decode_callback': callback_count, 'decode_rejection': decode_count}
     if changes != {'one_shot': 1, 'music_selector': 3, 'music_player': 1, 'context_sample_rate': 1,
-                   'decode_callback': 1, 'decode_rejection': 1}:
+                   'run_context': 1, 'decode_callback': 1, 'decode_rejection': 1}:
         raise PatchError(f'unexpected Cocos audio runtime layout: {changes}')
     helper = render_audio_runtime(music_paths)
     strict = next((v for v in ('"use strict";', "'use strict';") if patched.startswith(v)), '')
