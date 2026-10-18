@@ -65,8 +65,8 @@ assert.equal(await W9.load('short.mp3'),'dom');''')
     def test_music_player_uses_the_engine_web_player_dependencies(self):
         self.run_js('''const player=await W9.load('assets/resources/native/aa/music.mp3');
 assert.equal(player.state,l9.INIT);assert.equal(player.type,s9.WEB_AUDIO);
-assert.deepEqual(EB.calls.map(call=>call[0]),['hide','show','pause','resume']);
-assert.deepEqual(EB.calls.slice(2).map(call=>call[2]),[player,player]);''')
+assert.deepEqual(EB.calls.map(call=>call[0]),['show','pause','resume']);
+assert.deepEqual(EB.calls.slice(1).map(call=>call[2]),[player,player]);''')
 
     def test_audio_context_uses_fixed_sample_rate(self):
         self.run_js('''let options;globalThis.window={AudioContext:class{constructor(value){options=value}}};

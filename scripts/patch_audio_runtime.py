@@ -123,6 +123,7 @@ def render_audio_runtime(paths: list[str]) -> str:
         'if(!s)throw new Error("Web Audio unavailable");return!0}'
         'return(null==o?void 0:o.audioLoadMode)!==d&&s}\n'
         + MUSIC_PLAYER_SOURCE + AUDIO_CONTEXT_SOURCE
+        + '__pvzgeUsePlaybackAudioSession();\n'
     )
 
 
@@ -159,9 +160,9 @@ def patch_engine_source(source: str, music_paths: list[str]) -> tuple[str, dict[
         names = web_player_deps(match.group(0))
         deps = ','.join(f'{key}:{name}' for key, name in names.items())
         context = f'{{agent:{names["agent"]},bus:{names["bus"]},busEvents:{names["busEvents"]}}}'
-        # The engine's context agent and game exist here, so the show hook is registered during module setup.
+        # The engine's context agent and game exist here, so the show report is registered during module setup.
         return match.group(0) + (
-            f',__pvzgeMusic=(__pvzgeRestartAudioContextOnShow({context}),'
+            f',__pvzgeMusic=(__pvzgeReportAudioContextOnShow({context}),'
             f'__pvzgeCreateMusicPlayer(function(){{return{{{deps}}}}},{MUSIC_PCM_CACHE_BYTES}))'
         )
     patched, player_count = WEB_PLAYER_PATTERN.subn(music_player, patched)
@@ -213,7 +214,7 @@ def patch_docs(docs_dir: Path, report_path: Path) -> None:
     report_path.write_text(json.dumps({
         'policy': 'AudioSource loads of resources music UUIDs or explicit DOM_AUDIO use the decode-on-play '
                   'WebAudio player; music one-shots use WebAudio; other audio keeps the Cocos rule; '
-                  'WebAudio context at a fixed sample rate, suspended while hidden and restarted when shown',
+                  'WebAudio context at a fixed sample rate; playback audio session requested',
         'engine': engine.relative_to(docs_dir).as_posix(), 'changes': changes,
         'engineSha256Before': hashlib.sha256(before).hexdigest(),
         'engineSha256After': hashlib.sha256(patched.encode()).hexdigest(),
