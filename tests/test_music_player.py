@@ -12,8 +12,9 @@ const bus={handlers:new Map(),
   on(type,fn,target){this.handlers.set(type,(this.handlers.get(type)||[]).concat([[fn,target]]))},
   off(type,fn,target){this.handlers.set(type,(this.handlers.get(type)||[]).filter(([f,t])=>f!==fn||t!==target))},
   emit(type){for(const [fn,target] of (this.handlers.get(type)||[]).slice())fn.call(target)}};
-const requests=[],decodes=[],sources=[],gains=[],errors=[];
+const requests=[],decodes=[],sources=[],gains=[],errors=[],warnings=[];
 console.error=(...args)=>errors.push(args);
+console.warn=(...args)=>warnings.push(args.join(' '));
 const agent={currentTime:0,isRunning:true,waiting:[],
   decodeAudioData(data){return new Promise((resolve,reject)=>decodes.push({data,resolve,reject}))},
   createBufferSource(buffer,loop){
@@ -23,9 +24,7 @@ const agent={currentTime:0,isRunning:true,waiting:[],
   createGain(value){const gain={value,writes:0,disconnected:false,disconnect(){this.disconnected=true}};gains.push(gain);return gain},
   setGainValue(gain,value){gain.value=value;gain.writes++},
   connectContext(){},
-  onceRunning(fn){this.waiting.push(fn)},
-  offRunning(fn){this.waiting=this.waiting.filter(f=>f!==fn)},
-  runContext(){return Promise.resolve()}};
+  runContext(){return this.isRunning?Promise.resolve():new Promise(resolve=>this.waiting.push(resolve))}};
 globalThis.XMLHttpRequest=class{open(method,url){this.url=url}send(){requests.push(this)}};
 function respond(){const request=requests.at(-1);request.status=200;request.response=new ArrayBuffer(4);request.onload()}
 function decoded(duration,channels=2,rate=32000){return {duration,sampleRate:rate,numberOfChannels:channels,length:Math.round(duration*rate)}}
@@ -108,4 +107,14 @@ bus.emit('pause');await tick();assert.equal(player.state,states.INTERRUPTED);ass
 bus.emit('resume');await tick();assert.equal(player.state,states.PLAYING);assert.equal(end,1);
 agent.isRunning=false;const waiting=await Music.load('a.mp3');let started=false;waiting.play().then(()=>started=true);await tick();
 assert.equal(started,false);assert.equal(waiting.state,states.INIT);
-agent.isRunning=true;agent.waiting.shift()();await tick();assert.equal(started,true);assert.equal(waiting.state,states.PLAYING);''')
+agent.waiting.shift()();await tick();assert.equal(started,true);assert.equal(waiting.state,states.PLAYING);
+assert.deepEqual(warnings,['[pvzge-audio] music waits for the audio context','[pvzge-audio] music starts after the audio context resumed']);''')
+
+    def test_pause_stop_or_a_newer_play_cancel_a_start_waiting_for_the_context(self):
+        self.run_js('''agent.isRunning=false;const player=await Music.load('a.mp3');
+player.play();await player.pause();agent.waiting.shift()();await tick();
+assert.equal(player.state,states.INIT);assert.equal(requests.length,0);
+player.play();await player.stop();agent.waiting.shift()();await tick();
+assert.equal(player.state,states.STOPPED);assert.equal(requests.length,0);
+player.play();const latest=player.play();agent.waiting.shift()();await tick();assert.equal(requests.length,0);
+agent.waiting.shift()();await latest;assert.equal(player.state,states.PLAYING);assert.equal(requests.length,1);''')

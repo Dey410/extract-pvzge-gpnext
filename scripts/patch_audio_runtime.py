@@ -17,6 +17,7 @@ class PatchError(RuntimeError):
 AUDIO_CONTEXT_SAMPLE_RATE = 32000
 MUSIC_PCM_CACHE_BYTES = 32 * 1024 * 1024
 MUSIC_PLAYER_SOURCE = (Path(__file__).parent / 'music_player.js').read_text(encoding='utf-8')
+AUDIO_CONTEXT_SOURCE = (Path(__file__).parent / 'audio_context.js').read_text(encoding='utf-8')
 AUDIO_EXTENSIONS = frozenset({'.aac', '.flac', '.m4a', '.mp3', '.oga', '.ogg', '.opus', '.wav'})
 IDENT = r'[A-Za-z_$][\w$]*'
 MUSIC_SELECTOR_PATTERN = re.compile(
@@ -121,7 +122,7 @@ def render_audio_runtime(paths: list[str]) -> str:
         'if(load?__pvzgeDecodesOnPlay(u,o,d):__pvzgeIsMusic(u)){'
         'if(!s)throw new Error("Web Audio unavailable");return!0}'
         'return(null==o?void 0:o.audioLoadMode)!==d&&s}\n'
-        + MUSIC_PLAYER_SOURCE
+        + MUSIC_PLAYER_SOURCE + AUDIO_CONTEXT_SOURCE
     )
 
 
@@ -155,8 +156,14 @@ def patch_engine_source(source: str, music_paths: list[str]) -> tuple[str, dict[
     patched, selector_count = MUSIC_SELECTOR_PATTERN.subn(selector, source)
     def music_player(match):
         web_players.add(match['web'])
-        deps = ','.join(f'{key}:{name}' for key, name in web_player_deps(match.group(0)).items())
-        return match.group(0) + f',__pvzgeMusic=__pvzgeCreateMusicPlayer(function(){{return{{{deps}}}}},{MUSIC_PCM_CACHE_BYTES})'
+        names = web_player_deps(match.group(0))
+        deps = ','.join(f'{key}:{name}' for key, name in names.items())
+        context = f'{{agent:{names["agent"]},bus:{names["bus"]},busEvents:{names["busEvents"]}}}'
+        # The engine's context agent and game exist here, so the show hook is registered during module setup.
+        return match.group(0) + (
+            f',__pvzgeMusic=(__pvzgeRestartAudioContextOnShow({context}),'
+            f'__pvzgeCreateMusicPlayer(function(){{return{{{deps}}}}},{MUSIC_PCM_CACHE_BYTES}))'
+        )
     patched, player_count = WEB_PLAYER_PATTERN.subn(music_player, patched)
     if len(web_players) > 1:
         raise PatchError(f'audio selectors and music player name different WebAudio players: {sorted(web_players)}')
@@ -206,7 +213,7 @@ def patch_docs(docs_dir: Path, report_path: Path) -> None:
     report_path.write_text(json.dumps({
         'policy': 'AudioSource loads of resources music UUIDs or explicit DOM_AUDIO use the decode-on-play '
                   'WebAudio player; music one-shots use WebAudio; other audio keeps the Cocos rule; '
-                  'WebAudio context at a fixed sample rate',
+                  'WebAudio context at a fixed sample rate, suspended while hidden and restarted when shown',
         'engine': engine.relative_to(docs_dir).as_posix(), 'changes': changes,
         'engineSha256Before': hashlib.sha256(before).hexdigest(),
         'engineSha256After': hashlib.sha256(patched.encode()).hexdigest(),

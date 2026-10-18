@@ -9,7 +9,7 @@ from tests.audio_fixture import CONTEXT, DOM_LOADER, ONE_SHOT, WEB_PLAYER
 
 PRELUDE = '''
 var l9={INIT:0,PLAYING:1,PAUSED:2,STOPPED:3,INTERRUPTED:4},h9={ENDED:"ended",INTERRUPTION_BEGIN:"interruptionBegin",INTERRUPTION_END:"interruptionEnd"};
-var EB={calls:[],on(...args){this.calls.push(args)},off(){}},bB={EVENT_PAUSE:"pause",EVENT_RESUME:"resume"},v9=null;function m(){}
+var EB={calls:[],on(...args){this.calls.push(args)},off(){}},bB={EVENT_PAUSE:"pause",EVENT_RESUME:"resume",EVENT_HIDE:"hide",EVENT_SHOW:"show"},v9=null;function m(){}
 '''
 SELECTORS = '''
 var s9={DOM_AUDIO:0,WEB_AUDIO:1},E9={support:true};
@@ -65,7 +65,8 @@ assert.equal(await W9.load('short.mp3'),'dom');''')
     def test_music_player_uses_the_engine_web_player_dependencies(self):
         self.run_js('''const player=await W9.load('assets/resources/native/aa/music.mp3');
 assert.equal(player.state,l9.INIT);assert.equal(player.type,s9.WEB_AUDIO);
-assert.deepEqual(EB.calls.map(call=>[call[0],call[2]]),[['pause',player],['resume',player]]);''')
+assert.deepEqual(EB.calls.map(call=>call[0]),['hide','show','pause','resume']);
+assert.deepEqual(EB.calls.slice(2).map(call=>call[2]),[player,player]);''')
 
     def test_audio_context_uses_fixed_sample_rate(self):
         self.run_js('''let options;globalThis.window={AudioContext:class{constructor(value){options=value}}};

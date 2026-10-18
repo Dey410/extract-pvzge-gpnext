@@ -26,6 +26,12 @@ Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目�
   首次播放会损失解码耗时那一小段开头，但切歌时机不变。
 - 解码失败只记一次错误，时钟照常走，游戏仍会按时切到下一首。
 - 速率和音量只在值变化时写；结束用实际 `onended`；中断沿用 Cocos 的 pause/resume 事件。
+- 等待上下文时和引擎的 one-shot 一样走 `runContext()`：它检查 AudioContext 的实际状态并调用 `resume()`，
+  不依赖可能漏发的 statechange 事件。
+
+iOS WebKit 在 App 从后台回来后，可能让 AudioContext 卡在 interrupted，或显示 running 却不出声
+（WebKit bug 263627、283419、291892）。`scripts/audio_context.js` 在游戏隐藏时挂起上下文，
+显示时先挂起再恢复，并把恢复前后的 `state` 和 `currentTime` 以 `[pvzge-audio]` 警告写入日志。
 
 音乐的 one-shot 和 `loadNative` 使用游戏自带的 WebAudio；其他 one-shot 保留 Cocos 原本的显式模式规则，游戏设置里的音效加载方式照常生效。
 AudioContext 固定为 32 kHz：约 85% 的音效时长、48% 的音乐时长原本就不高于 32 kHz，

@@ -86,7 +86,7 @@ function __pvzgeCreateMusicPlayer(getDeps, cacheBytes) {
     this._buffer = null;
     this._holding = false;
     this._ticket = 0;
-    this._waiting = null;
+    this._playTicket = 0;
     this._volume = 1;
     this._loop = false;
     this._rate = 1;
@@ -186,12 +186,6 @@ function __pvzgeCreateMusicPlayer(getDeps, cacheBytes) {
     this._emit(engine().events.ENDED);
   };
 
-  p._cancelWaiting = function () {
-    if (!this._waiting) return;
-    engine().agent.offRunning(this._waiting);
-    this._waiting = null;
-  };
-
   p._start = function () {
     var e = engine();
     this._stopSource();
@@ -206,19 +200,21 @@ function __pvzgeCreateMusicPlayer(getDeps, cacheBytes) {
     else this._acquire();
   };
 
+  // Waits like the engine's one-shots: runContext checks the context's actual
+  // state and resumes it, so a missed statechange cannot leave music waiting.
   p.play = function () {
-    var self = this, agent = engine().agent;
-    this._cancelWaiting();
-    return new Promise(function (resolve) {
-      if (agent.isRunning) { self._start(); resolve(); return; }
-      self._waiting = function () { self._waiting = null; self._start(); resolve(); };
-      agent.onceRunning(self._waiting);
-      agent.runContext().catch(function (error) { console.error("music context resume failed", error); });
+    var self = this, agent = engine().agent, ticket = ++this._playTicket;
+    var waited = !agent.isRunning;
+    if (waited) console.warn("[pvzge-audio] music waits for the audio context");
+    return agent.runContext().then(function () {
+      if (ticket !== self._playTicket) return;
+      if (waited) console.warn("[pvzge-audio] music starts after the audio context resumed");
+      self._start();
     });
   };
 
   p.pause = function () {
-    this._cancelWaiting();
+    this._playTicket++;
     if (this._state !== engine().states.PLAYING) return Promise.resolve();
     this._rebase();
     this._ticking = false;
@@ -228,7 +224,7 @@ function __pvzgeCreateMusicPlayer(getDeps, cacheBytes) {
   };
 
   p.stop = function () {
-    this._cancelWaiting();
+    this._playTicket++;
     this._stopSource();
     this._ticking = false;
     this._offset = 0;
@@ -249,7 +245,7 @@ function __pvzgeCreateMusicPlayer(getDeps, cacheBytes) {
 
   p.destroy = function () {
     var e = engine();
-    this._cancelWaiting();
+    this._playTicket++;
     this._stopSource();
     this._ticking = false;
     this._release();
