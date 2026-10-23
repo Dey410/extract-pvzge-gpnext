@@ -354,7 +354,7 @@ jobs:
         shell: bash
         run: python3 -m unittest discover -s tests -t . -v
 
-      - name: Patch verified Cocos audio runtime
+      - name: Swap the game audio engine for Web Audio
         shell: bash
         run: |
           set -euo pipefail

@@ -1,37 +1,69 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.patch_audio_runtime import PatchError, music_audio_paths, patch_docs, patch_engine_source
-from tests.test_audio_contract import ENGINE
+from scripts.patch_audio_runtime import AUDIO_COMMANDS, PatchError, patch_docs, patch_entry_source
+
+ENTRY = '''import{x as O}from"./chunk.js";var z=class{constructor(e,t){this.audioRoot=t,this.manifest=e}async init(){}};
+async function ae(){let e=new URL(`audio/`,document.baseURI),t=await fetch(new URL(`manifest.json`,e));if(!t.ok)throw Error(`Audio manifest HTTP ${t.status}`);let n=new z(await t.json(),e);await n.init(),window.audioEngine=n}export{ae as start};'''
+AUDIO_API = 'System.register("chunks:///_virtual/TauriAudioAPI.ts",[],function(){var commands=[COMMANDS]});System.register("chunks:///_virtual/Other.ts",[],function(){"audio_other"});'
 
 
 class PatchDocsTests(unittest.TestCase):
-    def test_music_role_uses_exact_uuid_mapping_without_duration_probes(self):
+    def fixture(self, commands=AUDIO_COMMANDS):
         root = Path(tempfile.mkdtemp(prefix='pvzge-audio-retained-'))
-        bundle = root / 'assets' / 'resources'
-        (bundle / 'native' / 'fc').mkdir(parents=True)
-        (bundle / 'native' / 'fc' / 'fc991dd7-0033-4b80-9d41-c8a86a702e59.mp3').write_bytes(b'music')
-        (bundle / 'native' / 'fc' / 'effect.mp3').write_bytes(b'effect')
-        (bundle / 'config.json').write_text(json.dumps({
-            'uuids': ['fcmR3XADNLgJ1ByKhqcC5Z'], 'types': ['cc.AudioClip'],
-            'paths': {'0': ['music/short-intro', 0, 1]},
-        }))
-        self.assertEqual(music_audio_paths(root), ['assets/resources/native/fc/fc991dd7-0033-4b80-9d41-c8a86a702e59.mp3'])
-        (root / 'src').mkdir()
-        (root / 'src' / 'settings.json').write_text('{"CocosEngine":"3.8.4"}')
-        (root / 'cocos-js').mkdir()
-        engine = root / 'cocos-js' / '_virtual_cc-test.js'
-        engine.write_text(ENGINE)
-        patch_docs(root, root / 'reports' / 'audio.json')
-        self.assertIn('__pvzgeMusicPaths', engine.read_text())
-        report = json.loads((root / 'reports' / 'audio.json').read_text())
-        self.assertIn('explicit DOM_AUDIO use the decode-on-play', report['policy'])
-        self.assertEqual(report['audioContextSampleRate'], 32000)
-        self.assertEqual(report['musicPcmCacheBytes'], 32 * 1024 * 1024)
-        self.assertEqual(report['musicPaths'], ['assets/resources/native/fc/fc991dd7-0033-4b80-9d41-c8a86a702e59.mp3'])
+        for path, text in {
+            'src/settings.json': '{"CocosEngine":"3.8.4"}',
+            'audio/manifest.json': '{"Music_A":"Music/A b.mp3","Sound_X":"Sounds/x.mp3"}',
+            'audio/Music/A b.mp3': 'music', 'audio/Sounds/x.mp3': 'sound',
+            'assets/resources/config.json': '{"types":["cc.ImageAsset","cc.Prefab"]}',
+            'assets/main/index.js': AUDIO_API.replace('COMMANDS', ','.join(f'"{c}"' for c in sorted(commands))),
+            'assets/game-test.js': ENTRY, 'assets/chunk.js': 'export const x=1;',
+        }.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(text)
+        return root
 
-    def test_unknown_engine_layout_fails_explicitly(self):
+    def test_entry_creates_the_web_audio_engine_with_the_game_manifest(self):
+        root = self.fixture()
+        patch_docs(root, root / 'reports' / 'audio.json')
+        entry = (root / 'assets' / 'game-test.js').read_text()
+        self.assertIn('let n=new __pvzgeAudioEngine(await t.json(),e);await n.init(),window.audioEngine=n}', entry)
+        report = json.loads((root / 'reports' / 'audio.json').read_text())
+        self.assertEqual(report['entry'], 'assets/game-test.js')
+        self.assertEqual((report['audioContextSampleRate'], report['audioCacheBytes'], report['clips']), (32000, 32 * 1024 * 1024, 2))
+        program = '''import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
+class Context{constructor(options){this.options=options}}
+globalThis.window={AudioContext:Context,addEventListener(){}};globalThis.document={baseURI:'https://game.test/'};
+globalThis.fetch=async url=>({ok:true,json:async()=>({Music_A:'Music/A b.mp3'})});
+const {start}=await import(pathToFileURL(process.argv[2]).href);await start();
+assert.equal(window.audioEngine.constructor.name,'AudioEngine');assert.deepEqual(window.audioEngine.context.options,{sampleRate:32000});
+assert.equal(window.audioEngine.audioRoot.href,'https://game.test/audio/');assert.deepEqual(window.audioEngine.listClips(),['Music_A']);'''
+        result = subprocess.run(['node', '--input-type=module', '-', str(root / 'assets' / 'game-test.js')],
+                                input=program, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_unknown_layouts_fail_before_writing(self):
+        cases = {
+            'missing clip': lambda root: (root / 'audio/Sounds/x.mp3').unlink(),
+            'unsafe clip': lambda root: (root / 'audio/manifest.json').write_text('{"A":"../index.html"}'),
+            'cocos audio': lambda root: (root / 'assets/resources/config.json').write_text('{"types":["cc.AudioClip"]}'),
+            'second pool': lambda root: (root / 'assets/game-test.js').write_text(ENTRY + ENTRY.split(';', 1)[1]),
+            'second module': lambda root: (root / 'assets/other.js').write_text('window.audioEngine=null'),
+        }
+        for name, corrupt in cases.items():
+            root = self.fixture()
+            corrupt(root)
+            with self.subTest(case=name), self.assertRaises(PatchError):
+                patch_docs(root, root / 'reports' / 'audio.json')
+        for commands in [AUDIO_COMMANDS | {'audio_set_speed'}, AUDIO_COMMANDS - {'audio_seek'}]:
+            root = self.fixture(commands)
+            with self.subTest(commands=sorted(commands ^ AUDIO_COMMANDS)), self.assertRaises(PatchError):
+                patch_docs(root, root / 'reports' / 'audio.json')
+            self.assertEqual((root / 'assets' / 'game-test.js').read_text(), ENTRY)
+
+    def test_unparseable_result_fails(self):
         with self.assertRaises(PatchError):
-            patch_engine_source('unrelated JavaScript', [])
+            patch_entry_source(ENTRY.replace('export{ae as start};', 'export{'))

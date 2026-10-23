@@ -18,7 +18,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('enable_hybrid_audio_loading', workflow)
         self.assertNotIn('ffprobe', workflow)
         self.assertNotIn('rm -', workflow)
-        steps = ['Test core pipeline', 'Patch verified Cocos audio runtime', 'Transcode native textures to ASTC', 'Download base resource Release', 'Assemble ASTC package and verify sealed ZIP', 'Upload verified resource package', 'Upload delta resource package', 'Publish resource Release']
+        steps = ['Test core pipeline', 'Swap the game audio engine for Web Audio', 'Transcode native textures to ASTC', 'Download base resource Release', 'Assemble ASTC package and verify sealed ZIP', 'Upload verified resource package', 'Upload delta resource package', 'Publish resource Release']
         self.assertEqual([workflow.index(step) for step in steps], sorted(workflow.index(step) for step in steps))
         self.assertIn('python3 -m unittest discover -s tests -t . -v', workflow)
         self.assertIn('mktemp -d', workflow)
