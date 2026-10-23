@@ -435,8 +435,18 @@ jobs:
         with:
           name: GardendlessResources-${{ env.PACKAGE_TAG }}
           path: |
-            ${{ env.RUN_ROOT }}/release/
+            ${{ env.RUN_ROOT }}/release/GardendlessResources-${{ env.PACKAGE_TAG }}.zip
             ${{ env.REPORTS }}/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload delta resource package
+        if: env.BASE_TAG != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: GardendlessResources-${{ env.PACKAGE_TAG }}-from-${{ env.BASE_TAG }}
+          path: ${{ env.RUN_ROOT }}/release/GardendlessResources-${{ env.PACKAGE_TAG }}-from-${{ env.BASE_TAG }}.zip
           if-no-files-found: error
           retention-days: 7
           compression-level: 0

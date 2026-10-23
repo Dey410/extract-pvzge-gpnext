@@ -9,8 +9,8 @@ Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目�
 
 产物以 `<游戏版本>+<packageId 前 8 位>` 命名，例如 `GardendlessResources-0.15.0+916b6a83.zip`，
 另有独立的 `reports/`。本仓库已有 Release 时，以创建时间最新的 Release 为基础，同时生成
-`GardendlessResources-<本次>-from-<基础>.zip` 增量包。未勾选 `publish` 时两者只作为保留 7 天的
-Actions 产物；勾选后创建同名 Release，它成为下一次的基础。相同 packageId 已发布时直接失败，
+`GardendlessResources-<本次>-from-<基础>.zip` 增量包。两者分别作为保留 7 天的 Actions 产物上传
+（reports 随完整包），增量包可以单独下载；勾选 `publish` 后另外创建同名 Release，它成为下一次的基础。相同 packageId 已发布时直接失败，
 旧 Release 不自动删除。完整包 ZIP 内只有 `docs/` 运行资源：
 实际选择的 ASTC（PNG/AVIF/WebP 共用一条转换路径）、游戏代码、音频和必要的网页图片。native 原图、解码中间 PNG、
 元数据备份及已被 ASTC 替代的 PVR/PKM 保留在构建源目录或 reports 中，不进入正式资源 ZIP，不用删除源文件来减包。

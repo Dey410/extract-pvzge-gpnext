@@ -18,7 +18,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('enable_hybrid_audio_loading', workflow)
         self.assertNotIn('ffprobe', workflow)
         self.assertNotIn('rm -', workflow)
-        steps = ['Test core pipeline', 'Patch verified Cocos audio runtime', 'Transcode native textures to ASTC', 'Download base resource Release', 'Assemble ASTC package and verify sealed ZIP', 'Upload verified resource package', 'Publish resource Release']
+        steps = ['Test core pipeline', 'Patch verified Cocos audio runtime', 'Transcode native textures to ASTC', 'Download base resource Release', 'Assemble ASTC package and verify sealed ZIP', 'Upload verified resource package', 'Upload delta resource package', 'Publish resource Release']
         self.assertEqual([workflow.index(step) for step in steps], sorted(workflow.index(step) for step in steps))
         self.assertIn('python3 -m unittest discover -s tests -t . -v', workflow)
         self.assertIn('mktemp -d', workflow)
@@ -26,6 +26,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('${BASE_ZIP:+--base "$BASE_ZIP"}', workflow)
         self.assertIn('PACKAGE_TAG="$GAME_VERSION+${PACKAGE_ID:7:8}"', workflow)
         self.assertIn('GardendlessResources-$PACKAGE_TAG-from-$BASE_TAG.zip', workflow)
+        delta = workflow.split('- name: Upload delta resource package', 1)[1].split('- name:', 1)[0]
+        self.assertIn("if: env.BASE_TAG != ''", delta)
+        self.assertIn('name: GardendlessResources-${{ env.PACKAGE_TAG }}-from-${{ env.BASE_TAG }}', delta)
         publish = workflow.split('- name: Publish resource Release', 1)[1]
         self.assertIn('if: inputs.publish', publish)
         self.assertLess(publish.index('gh release view "$PACKAGE_TAG"'), publish.index('gh release create "$PACKAGE_TAG"'))
