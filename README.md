@@ -1,11 +1,16 @@
 # PvZGE Lite 资源提取
 
-在 GitHub Actions 的 **Extract PvZGE Lite Tauri Assets** 手动运行一次，唯一输入
-`release_tag` 留空时使用最新非草稿 Release（包含 Pre-release）的非 macOS Lite ZIP。
+在 GitHub Actions 的 **Extract PvZGE Lite Tauri Assets** 手动运行一次。必填 `release_tag`
+是 Gzh0821/pvzg_site 的 Release 标签，例如 `0.15.0`，取其中非 macOS 的 Lite ZIP；运行标题显示为
+`0.15.0 · 测试` 或 `0.15.0 · 发布`。`publish` 默认关闭，勾选后把本次产物发布为本仓库 Release。
 Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目录组装和 ZIP 重开验证。
 任何未知引擎、补丁布局、纹理映射或封存验证失败都不会上传正式资源 ZIP。
 
-产物是 `GardendlessResources.zip` 和独立的 `reports/`。ZIP 内只有 `docs/` 运行资源：
+产物以 `<游戏版本>+<packageId 前 8 位>` 命名，例如 `GardendlessResources-0.15.0+916b6a83.zip`，
+另有独立的 `reports/`。本仓库已有 Release 时，以创建时间最新的 Release 为基础，同时生成
+`GardendlessResources-<本次>-from-<基础>.zip` 增量包。未勾选 `publish` 时两者只作为保留 7 天的
+Actions 产物；勾选后创建同名 Release，它成为下一次的基础。相同 packageId 已发布时直接失败，
+旧 Release 不自动删除。完整包 ZIP 内只有 `docs/` 运行资源：
 实际选择的 ASTC（PNG/AVIF/WebP 共用一条转换路径）、游戏代码、音频和必要的网页图片。native 原图、解码中间 PNG、
 元数据备份及已被 ASTC 替代的 PVR/PKM 保留在构建源目录或 reports 中，不进入正式资源 ZIP，不用删除源文件来减包。
 每次构建使用全新的 run 输出目录。
@@ -54,6 +59,13 @@ Pillow 固定 12.1.1，AVIF/WebP 按解码 RGBA PNG 大小分类。已有 ASTC �
 GP 事实、真实 producer commit、`minHostAbi:1` 和索引原字节 SHA256；包身份是 manifest
 原字节 SHA256，不写回自身。完整工具、输入资产和运行详情留在包外 reports。
 ZIP 封存后重新核对成员、路径、CRC、实际展开大小和每项 SHA256。摘要验证一致性，不认证来源。
+
+增量包只放哈希不在基础包索引里的文件，另带与完整包逐字节相同的 manifest、file-index，以及
+`docs/__gardendless/package/delta.json`（`{"schemaVersion":1,"basePackageId":"sha256:…"}`）。
+加载器确认当前资源的 packageId 等于 basePackageId 后，按 SHA256 从当前资源复制其余文件，
+删除 delta.json 再完整校验，结果与完整包相同。封存后先完整验证基础包和新完整包，再逐项确认
+增量包内文件与索引一致、缺省文件的哈希都在基础包中，且没有未索引文件。增量包需要 0.9.0 之后
+支持增量导入的 GardendlessLoader；当前资源不是基础包时只能导入完整包。
 
 资源包要求 GardendlessLoader 0.9.0 / Host ABI 1。页面在检查 `window.__gardendlessHost.config.hostAbi`
 之后才创建真实 module 入口；旧宿主显示升级文字，游戏入口不会执行。

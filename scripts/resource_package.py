@@ -15,6 +15,7 @@ from scripts.transcode_textures_astc import AstcError, TextureJob, _validate_ast
 HOST_ABI = 1
 MANIFEST_PATH = '__gardendless/package/resource-manifest.json'
 INDEX_PATH = '__gardendless/package/file-index.json'
+DELTA_PATH = '__gardendless/package/delta.json'
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 MAX_FILES = 200_000
@@ -180,21 +181,40 @@ def assemble_package(source: Path, output: Path, texture_map: Path, producer_com
     return archive_path
 
 
+def archive_members(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
+    members = {}
+    total = 0
+    for entry in archive.infolist():
+        name = safe_path(entry.filename)
+        if not name.startswith('docs/') or entry.is_dir() or name in members or entry.flag_bits & 1 or stat.S_IFMT(entry.external_attr >> 16) not in (0, stat.S_IFREG):
+            raise PackageError(f'invalid or duplicate archive entry: {name}')
+        if entry.file_size > MAX_FILE_BYTES:
+            raise PackageError('archive member exceeds byte budget')
+        total += entry.file_size
+        members[name] = entry
+    if len(members) > MAX_FILES or total > MAX_TOTAL_BYTES:
+        raise PackageError('archive exceeds entry or byte budget')
+    return members
+
+
+def verify_member(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, item: dict) -> None:
+    if entry.file_size != item['sizeBytes']:
+        raise PackageError('payload size or membership mismatch')
+    digest, actual = hashlib.sha256(), 0
+    with archive.open(entry) as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            actual += len(chunk)
+            if actual > item['sizeBytes']:
+                raise PackageError('expanded payload exceeds declared size')
+            digest.update(chunk)
+    if actual != item['sizeBytes'] or digest.hexdigest() != item['sha256']:
+        raise PackageError('payload length or digest mismatch')
+
+
 def verify_package_zip(path: Path) -> str:
     try:
         with zipfile.ZipFile(path) as archive:
-            members = {}
-            total = 0
-            for entry in archive.infolist():
-                name = safe_path(entry.filename)
-                if not name.startswith('docs/') or entry.is_dir() or name in members or entry.flag_bits & 1 or stat.S_IFMT(entry.external_attr >> 16) not in (0, stat.S_IFREG):
-                    raise PackageError(f'invalid or duplicate archive entry: {name}')
-                if entry.file_size > MAX_FILE_BYTES:
-                    raise PackageError('archive member exceeds byte budget')
-                total += entry.file_size
-                members[name] = entry
-            if len(members) > MAX_FILES or total > MAX_TOTAL_BYTES:
-                raise PackageError('archive exceeds entry or byte budget')
+            members = archive_members(archive)
             def metadata(relative, maximum):
                 entry = members.pop('docs/' + relative, None)
                 if entry is None or entry.file_size > maximum:
@@ -216,22 +236,71 @@ def verify_package_zip(path: Path) -> str:
                     raise PackageError('index paths are reserved, duplicate, or unsorted')
                 previous = relative
                 entry = members.pop('docs/' + relative, None)
-                if entry is None or entry.file_size != item['sizeBytes']:
+                if entry is None:
                     raise PackageError('payload size or membership mismatch')
-                digest, actual = hashlib.sha256(), 0
-                with archive.open(entry) as stream:
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-                        actual += len(chunk)
-                        if actual > item['sizeBytes']:
-                            raise PackageError('expanded payload exceeds declared size')
-                        digest.update(chunk)
-                if actual != item['sizeBytes'] or digest.hexdigest() != item['sha256']:
-                    raise PackageError('payload length or digest mismatch')
+                verify_member(archive, entry, item)
             if members:
                 raise PackageError('unindexed archive payload')
             return 'sha256:' + hashlib.sha256(manifest_data).hexdigest()
     except (OSError, zipfile.BadZipFile, ValueError, KeyError, TypeError) as error:
         raise PackageError(f'invalid resource ZIP: {error}') from error
+
+
+def package_digests(archive: zipfile.ZipFile) -> set[str]:
+    return {item['sha256'] for item in read_json(archive.read('docs/' + INDEX_PATH))['files']}
+
+
+def build_delta(package: Path, base: Path, output: Path) -> Path:
+    """Keep only the files whose digest the base package lacks, beside the full metadata and the base marker."""
+    try:
+        with zipfile.ZipFile(base) as archive:
+            base_id = 'sha256:' + hashlib.sha256(archive.read('docs/' + MANIFEST_PATH)).hexdigest()
+            base_digests = package_digests(archive)
+        with zipfile.ZipFile(package) as source, zipfile.ZipFile(output, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as delta:
+            index = read_json(source.read('docs/' + INDEX_PATH))['files']
+            kept = {'docs/' + MANIFEST_PATH, 'docs/' + INDEX_PATH} | {'docs/' + item['path'] for item in index if item['sha256'] not in base_digests}
+            for entry in source.infolist():
+                if entry.filename in kept:
+                    with source.open(entry) as reader, delta.open(entry.filename, 'w') as writer:
+                        shutil.copyfileobj(reader, writer, 1024 * 1024)
+            with delta.open('docs/' + DELTA_PATH, 'w') as writer:
+                writer.write(json_bytes({'schemaVersion': 1, 'basePackageId': base_id}))
+    except (OSError, zipfile.BadZipFile, ValueError, KeyError, TypeError) as error:
+        raise PackageError(f'cannot build delta ZIP: {error}') from error
+    verify_delta_zip(output, base, package)
+    return output
+
+
+def verify_delta_zip(path: Path, base: Path, package: Path) -> str:
+    """Prove that the delta applied to base, as the loader applies it, restores package exactly."""
+    base_id = verify_package_zip(base)
+    package_id = verify_package_zip(package)
+    try:
+        with zipfile.ZipFile(base) as archive:
+            base_digests = package_digests(archive)
+        with zipfile.ZipFile(package) as source:
+            metadata = {name: source.read('docs/' + name) for name in (MANIFEST_PATH, INDEX_PATH)}
+        with zipfile.ZipFile(path) as archive:
+            members = archive_members(archive)
+            for name, expected in metadata.items():
+                entry = members.pop('docs/' + name, None)
+                if entry is None or entry.file_size != len(expected) or archive.read(entry) != expected:
+                    raise PackageError('delta metadata differs from its full package')
+            marker = members.pop('docs/' + DELTA_PATH, None)
+            expected = json_bytes({'schemaVersion': 1, 'basePackageId': base_id})
+            if marker is None or marker.file_size != len(expected) or archive.read(marker) != expected:
+                raise PackageError('delta marker does not name the base package')
+            for item in read_json(metadata[INDEX_PATH])['files']:
+                entry = members.pop('docs/' + item['path'], None)
+                if entry is not None:
+                    verify_member(archive, entry, item)
+                elif item['sha256'] not in base_digests:
+                    raise PackageError(f'delta omits a file the base lacks: {item["path"]}')
+            if members:
+                raise PackageError('unindexed delta payload')
+        return package_id
+    except (OSError, zipfile.BadZipFile, ValueError, KeyError, TypeError) as error:
+        raise PackageError(f'invalid delta ZIP: {error}') from error
 
 
 def main() -> int:
@@ -242,16 +311,25 @@ def main() -> int:
     parser.add_argument('--producer-commit', required=True)
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--source-dirty', action='store_true', help='Mark a local uncommitted producer validation in the external report')
+    parser.add_argument('--base', type=Path, help='Published full package ZIP to build GardendlessResources-delta.zip against')
     args = parser.parse_args()
     try:
         archive = assemble_package(args.source, args.output, args.texture_map, args.producer_commit)
         package_id = 'sha256:' + hash_file(args.output / 'docs' / MANIFEST_PATH)
+        report = {'packageId': package_id, 'archiveSha256': hash_file(archive), 'producerCommit': args.producer_commit, 'sourceDirty': args.source_dirty, 'archive': str(archive)}
+        if args.base is not None:
+            delta = build_delta(archive, args.base, args.output / 'GardendlessResources-delta.zip')
+            with zipfile.ZipFile(args.base) as base:
+                report['basePackageId'] = 'sha256:' + hashlib.sha256(base.read('docs/' + MANIFEST_PATH)).hexdigest()
+            report.update(deltaArchiveSha256=hash_file(delta), deltaArchive=str(delta))
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_bytes(json_bytes({'packageId': package_id, 'archiveSha256': hash_file(archive), 'producerCommit': args.producer_commit, 'sourceDirty': args.source_dirty, 'archive': str(archive)}))
-    except (PackageError, AstcError, OSError, ValueError, KeyError) as error:
+        args.report.write_bytes(json_bytes(report))
+    except (PackageError, AstcError, OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
         print(f'error: {error}')
         return 1
     print(f'Verified {archive}: {package_id}')
+    if args.base is not None:
+        print(f'Verified {delta} against {report["basePackageId"]}')
     return 0
 
 

@@ -6,7 +6,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from scripts.resource_package import PackageError, assemble_package, verify_package_zip
+from scripts.resource_package import PackageError, assemble_package, build_delta, verify_delta_zip, verify_package_zip
 
 
 class PackageTests(unittest.TestCase):
@@ -127,6 +127,47 @@ class PackageTests(unittest.TestCase):
         raw[info.header_offset + 30 + name_len + extra_len] ^= 1
         corrupt = root / 'bad-crc.zip';corrupt.write_bytes(raw)
         with self.assertRaises(PackageError): verify_package_zip(corrupt)
+
+
+class DeltaTests(unittest.TestCase):
+    fixture = PackageTests.fixture
+
+    def releases(self):
+        root, source, mapping = self.fixture()
+        base = assemble_package(source, root / 'base', mapping, 'a' * 40)
+        (source / 'cocos-js/cc.js').write_text('System.register; // next')
+        package = assemble_package(source, root / 'package', mapping, 'b' * 40)
+        return root, source, mapping, base, package
+
+    def test_delta_keeps_changed_files_and_restores_the_new_package(self):
+        root, _, _, base, package = self.releases()
+        delta = build_delta(package, base, root / 'delta.zip')
+        with zipfile.ZipFile(delta) as archive, zipfile.ZipFile(package) as full:
+            self.assertEqual(set(archive.namelist()), {'docs/cocos-js/cc.js', 'docs/__gardendless/package/resource-manifest.json', 'docs/__gardendless/package/file-index.json', 'docs/__gardendless/package/delta.json'})
+            for name in ['docs/__gardendless/package/resource-manifest.json', 'docs/__gardendless/package/file-index.json']:
+                self.assertEqual(archive.read(name), full.read(name))
+            self.assertEqual(json.loads(archive.read('docs/__gardendless/package/delta.json')), {'schemaVersion': 1, 'basePackageId': verify_package_zip(base)})
+        self.assertEqual(verify_delta_zip(delta, base, package), verify_package_zip(package))
+
+    def test_delta_rejects_another_base_missing_changes_and_tampering(self):
+        root, source, mapping, base, package = self.releases()
+        delta = build_delta(package, base, root / 'delta.zip')
+        (source / 'cocos-js/cc.js').write_text('System.register; // other')
+        other = assemble_package(source, root / 'other', mapping, 'c' * 40)
+        with self.assertRaises(PackageError):
+            verify_delta_zip(delta, other, package)
+        with zipfile.ZipFile(delta) as archive:
+            entries = [(info.filename, archive.read(info)) for info in archive.infolist()]
+        for corruption in ['missing', 'tampered', 'hidden']:
+            target = root / (corruption + '.zip')
+            content = list(entries)
+            if corruption == 'missing': content = [(name, data) for name, data in content if not name.endswith('/cc.js')]
+            if corruption == 'tampered': content = [(name, b'X' * len(data) if name.endswith('/cc.js') else data) for name, data in content]
+            if corruption == 'hidden': content.append(('docs/hidden.js', b'hidden'))
+            with zipfile.ZipFile(target, 'x') as archive:
+                for name, data in content: archive.writestr(name, data)
+            with self.subTest(corruption=corruption), self.assertRaises(PackageError):
+                verify_delta_zip(target, base, package)
 
 
 class AbiGuardTests(unittest.TestCase):

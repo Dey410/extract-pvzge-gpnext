@@ -1,14 +1,19 @@
 name: Extract PvZGE Lite Tauri Assets
+run-name: "${{ inputs.release_tag }} · ${{ inputs.publish && '发布' || '测试' }}"
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Gzh0821/pvzg_site 的 Release 标签（留空则使用最新非草稿 Release，包含 Pre-release）"
-        required: false
+        description: "Gzh0821/pvzg_site 的 Release 标签，例如 0.15.0"
+        required: true
+      publish:
+        description: "发布为本仓库 Release，作为下一次增量包的基础"
+        type: boolean
+        default: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   extract:
@@ -40,7 +45,6 @@ jobs:
       # ============================================================
 
       - name: Download and unpack PvZGE Lite
-        id: download
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,22 +58,8 @@ jobs:
 
           RELEASE_TAG="$REQUESTED_RELEASE_TAG"
 
-          # 未指定 tag 时：
-          # 获取最新非 Draft Release
-          # Pre-release 也包含在内
           if [[ -z "$RELEASE_TAG" ]]; then
-            RELEASE_TAG="$(
-              gh release list \
-                --repo "$REPO" \
-                --exclude-drafts \
-                --limit 1 \
-                --json tagName \
-                --jq '.[0].tagName'
-            )"
-          fi
-
-          if [[ -z "$RELEASE_TAG" ]]; then
-            echo "::error::$REPO 没有可用的 Release"
+            echo "::error::请填写 $REPO 的 Release 标签"
             exit 1
           fi
 
@@ -192,7 +182,7 @@ jobs:
           sha256sum "$EXE"
 
           # ----------------------------------------------------------
-          # 保存环境变量 / outputs
+          # 保存环境变量
           # ----------------------------------------------------------
 
           {
@@ -200,8 +190,6 @@ jobs:
             echo "ASSET_NAME=$ASSET_NAME"
             echo "EXE=$EXE"
           } >> "$GITHUB_ENV"
-
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # tauri-dumper
@@ -367,25 +355,95 @@ jobs:
           python3 -m scripts.transcode_textures_astc \
             "$SOURCE_DOCS" "$REPORTS/astc-texture-summary.txt"
 
+      # ============================================================
+      # 增量包的基础：本仓库创建时间最新的 Release
+      # ============================================================
+
+      - name: Download base resource Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BASE_TAG="$(
+            gh release list \
+              --repo "$GITHUB_REPOSITORY" \
+              --exclude-drafts \
+              --limit 1 \
+              --json tagName \
+              --jq '.[0].tagName // empty'
+          )"
+          BASE_ZIP=""
+          if [[ -z "$BASE_TAG" ]]; then
+            echo "还没有资源 Release，本次只生成完整包"
+          else
+            mkdir -p "$RUN_ROOT/base"
+            gh release download "$BASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "GardendlessResources-$BASE_TAG.zip" \
+              --dir "$RUN_ROOT/base"
+            BASE_ZIP="$RUN_ROOT/base/GardendlessResources-$BASE_TAG.zip"
+          fi
+          {
+            echo "BASE_TAG=$BASE_TAG"
+            echo "BASE_ZIP=$BASE_ZIP"
+          } >> "$GITHUB_ENV"
+
       - name: Assemble ASTC package and verify sealed ZIP
         shell: bash
         run: |
           set -euo pipefail
           python3 -m scripts.resource_package \
             "$SOURCE_DOCS" "$RUN_ROOT/package" "$REPORTS/astc-texture-map.csv" \
-            --producer-commit "$GITHUB_SHA" --report "$REPORTS/package-build.json"
+            --producer-commit "$GITHUB_SHA" --report "$REPORTS/package-build.json" \
+            ${BASE_ZIP:+--base "$BASE_ZIP"}
           jq -n --arg release "$RELEASE_TAG" --arg asset "$ASSET_NAME" \
-            --arg producer "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
-            '{releaseTag:$release,sourceAsset:$asset,producerCommit:$producer,runId:$run,tauriDumper:"0.2.2",astcenc:"5.6.0",pillow:"12.1.1"}' \
+            --arg producer "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg base "$BASE_TAG" \
+            '{releaseTag:$release,sourceAsset:$asset,producerCommit:$producer,runId:$run,baseRelease:$base,tauriDumper:"0.2.2",astcenc:"5.6.0",pillow:"12.1.1"}' \
             > "$REPORTS/source-build.json"
+
+          # 包名：<游戏版本>+<packageId 前 8 位>
+          PACKAGE_ID="$(jq -r .packageId "$REPORTS/package-build.json")"
+          GAME_VERSION="$(jq -r .gameVersion "$RUN_ROOT/package/docs/__gardendless/package/resource-manifest.json")"
+          PACKAGE_TAG="$GAME_VERSION+${PACKAGE_ID:7:8}"
+          mkdir "$RUN_ROOT/release"
+          mv "$RUN_ROOT/package/GardendlessResources.zip" \
+            "$RUN_ROOT/release/GardendlessResources-$PACKAGE_TAG.zip"
+          if [[ -n "$BASE_TAG" ]]; then
+            mv "$RUN_ROOT/package/GardendlessResources-delta.zip" \
+              "$RUN_ROOT/release/GardendlessResources-$PACKAGE_TAG-from-$BASE_TAG.zip"
+          fi
+          echo "PACKAGE_TAG=$PACKAGE_TAG" >> "$GITHUB_ENV"
+          ls -l "$RUN_ROOT/release"
 
       - name: Upload verified resource package
         uses: actions/upload-artifact@v4
         with:
-          name: pvzge-lite-${{ steps.download.outputs.release_tag }}-loader-0.9
+          name: GardendlessResources-${{ env.PACKAGE_TAG }}
           path: |
-            ${{ env.RUN_ROOT }}/package/GardendlessResources.zip
+            ${{ env.RUN_ROOT }}/release/
             ${{ env.REPORTS }}/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+      - name: Publish resource Release
+        if: inputs.publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$PACKAGE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::$PACKAGE_TAG 已经发布过，相同 packageId 不重复发布"
+            exit 1
+          fi
+          NOTES="游戏版本 $RELEASE_TAG，packageId $(jq -r .packageId "$REPORTS/package-build.json")。"
+          if [[ -n "$BASE_TAG" ]]; then
+            NOTES+=$'\n\n'"增量包只适用于当前资源是 $BASE_TAG 的加载器，并且需要 0.9.0 之后支持增量导入的 GardendlessLoader；其他情况请导入完整包。"
+          fi
+          gh release create "$PACKAGE_TAG" "$RUN_ROOT"/release/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$PACKAGE_TAG" \
+            --notes "$NOTES"
