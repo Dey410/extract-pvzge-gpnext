@@ -1,12 +1,12 @@
 name: Extract PvZGE Lite Tauri Assets
-run-name: "${{ inputs.release_tag }} · ${{ inputs.publish && '发布' || '测试' }}"
+run-name: "${{ inputs.release_tag || '最新' }} · ${{ inputs.publish && '发布' || '测试' }}"
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Gzh0821/pvzg_site 的 Release 标签，例如 0.15.0"
-        required: true
+        description: "Gzh0821/pvzg_site 的 Release 标签，例如 0.15.0；留空使用最新非草稿 Release（包含 Pre-release）"
+        required: false
       publish:
         description: "发布为本仓库 Release，作为下一次增量包的基础"
         type: boolean
@@ -58,8 +58,20 @@ jobs:
 
           RELEASE_TAG="$REQUESTED_RELEASE_TAG"
 
+          # 未填写时使用最新非草稿 Release，包含 Pre-release
           if [[ -z "$RELEASE_TAG" ]]; then
-            echo "::error::请填写 $REPO 的 Release 标签"
+            RELEASE_TAG="$(
+              gh release list \
+                --repo "$REPO" \
+                --exclude-drafts \
+                --limit 1 \
+                --json tagName \
+                --jq '.[0].tagName // empty'
+            )"
+          fi
+
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "::error::$REPO 没有可用的 Release"
             exit 1
           fi
 
@@ -414,6 +426,8 @@ jobs:
               "$RUN_ROOT/release/GardendlessResources-$PACKAGE_TAG-from-$BASE_TAG.zip"
           fi
           echo "PACKAGE_TAG=$PACKAGE_TAG" >> "$GITHUB_ENV"
+          # 留空取最新时运行标题只能写“最新”，实际版本写进运行摘要
+          echo "资源包：$PACKAGE_TAG" >> "$GITHUB_STEP_SUMMARY"
           ls -l "$RUN_ROOT/release"
 
       - name: Upload verified resource package

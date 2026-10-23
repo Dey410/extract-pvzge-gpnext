@@ -6,10 +6,11 @@ class WorkflowTests(unittest.TestCase):
     def test_versioned_inputs_and_all_core_gates_before_upload_and_publish(self):
         workflow = (Path(__file__).parents[1] / '.github/workflows/extract-pvzge-tauri.yml').read_text()
         self.assertEqual(workflow.count('workflow_dispatch:'), 1)
-        self.assertIn("run-name: \"${{ inputs.release_tag }} · ${{ inputs.publish && '发布' || '测试' }}\"", workflow)
+        self.assertIn("run-name: \"${{ inputs.release_tag || '最新' }} · ${{ inputs.publish && '发布' || '测试' }}\"", workflow)
         inputs = workflow.split('inputs:', 1)[1].split('permissions:', 1)[0]
         self.assertIn('release_tag:', inputs)
-        self.assertIn('required: true', inputs)
+        self.assertIn('required: false', inputs)
+        self.assertIn("--jq '.[0].tagName // empty'", workflow.split('- name: Download and unpack PvZGE Lite', 1)[1])
         self.assertIn('publish:', inputs)
         self.assertIn('default: false', inputs)
         self.assertIn('contents: write', workflow)

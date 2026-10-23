@@ -1,8 +1,9 @@
 # PvZGE Lite 资源提取
 
-在 GitHub Actions 的 **Extract PvZGE Lite Tauri Assets** 手动运行一次。必填 `release_tag`
-是 Gzh0821/pvzg_site 的 Release 标签，例如 `0.15.0`，取其中非 macOS 的 Lite ZIP；运行标题显示为
-`0.15.0 · 测试` 或 `0.15.0 · 发布`。`publish` 默认关闭，勾选后把本次产物发布为本仓库 Release。
+在 GitHub Actions 的 **Extract PvZGE Lite Tauri Assets** 手动运行一次。`release_tag` 是
+Gzh0821/pvzg_site 的 Release 标签，例如 `0.15.0`，留空时使用最新非草稿 Release（包含 Pre-release），
+取其中非 macOS 的 Lite ZIP。运行标题显示为 `0.15.0 · 测试` 或 `0.15.0 · 发布`，留空时显示
+`最新 · 测试`，实际包名写在运行摘要里。`publish` 默认关闭，勾选后把本次产物发布为本仓库 Release。
 Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目录组装和 ZIP 重开验证。
 任何未知引擎、补丁布局、纹理映射或封存验证失败都不会上传正式资源 ZIP。
 
