@@ -443,13 +443,13 @@ jobs:
 
       - name: Upload delta resource package
         if: env.BASE_TAG != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: GardendlessResources-${{ env.PACKAGE_TAG }}-from-${{ env.BASE_TAG }}
+          # 不再套一层 ZIP：下载到的就是增量包本身，加载器可直接导入；artifact 名取文件名
+          archive: false
           path: ${{ env.RUN_ROOT }}/release/GardendlessResources-${{ env.PACKAGE_TAG }}-from-${{ env.BASE_TAG }}.zip
           if-no-files-found: error
           retention-days: 7
-          compression-level: 0
 
       - name: Publish resource Release
         if: inputs.publish
