@@ -28,7 +28,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('GardendlessResources-$PACKAGE_TAG-from-$BASE_TAG.zip', workflow)
         delta = workflow.split('- name: Upload delta resource package', 1)[1].split('- name:', 1)[0]
         self.assertIn("if: env.BASE_TAG != ''", delta)
-        self.assertIn('name: GardendlessResources-${{ env.PACKAGE_TAG }}-from-${{ env.BASE_TAG }}', delta)
+        # Uploaded as the delta ZIP itself, not wrapped in an artifact ZIP.
+        self.assertIn('uses: actions/upload-artifact@v7', delta)
+        self.assertIn('archive: false', delta)
+        self.assertIn('path: ${{ env.RUN_ROOT }}/release/GardendlessResources-${{ env.PACKAGE_TAG }}-from-${{ env.BASE_TAG }}.zip', delta)
         publish = workflow.split('- name: Publish resource Release', 1)[1]
         self.assertIn('if: inputs.publish', publish)
         self.assertLess(publish.index('gh release view "$PACKAGE_TAG"'), publish.index('gh release create "$PACKAGE_TAG"'))
