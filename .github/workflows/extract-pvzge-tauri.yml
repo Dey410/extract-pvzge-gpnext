@@ -431,15 +431,21 @@ jobs:
           ls -l "$RUN_ROOT/release"
 
       - name: Upload verified resource package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: GardendlessResources-${{ env.PACKAGE_TAG }}
-          path: |
-            ${{ env.RUN_ROOT }}/release/GardendlessResources-${{ env.PACKAGE_TAG }}.zip
-            ${{ env.REPORTS }}/
+          # 不再套一层 ZIP：下载到的就是资源包本身，加载器可直接导入；artifact 名取文件名
+          archive: false
+          path: ${{ env.RUN_ROOT }}/release/GardendlessResources-${{ env.PACKAGE_TAG }}.zip
           if-no-files-found: error
           retention-days: 7
-          compression-level: 0
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: GardendlessResources-${{ env.PACKAGE_TAG }}-reports
+          path: ${{ env.REPORTS }}/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload delta resource package
         if: env.BASE_TAG != ''

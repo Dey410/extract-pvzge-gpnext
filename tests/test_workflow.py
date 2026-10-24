@@ -18,7 +18,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('enable_hybrid_audio_loading', workflow)
         self.assertNotIn('ffprobe', workflow)
         self.assertNotIn('rm -', workflow)
-        steps = ['Test core pipeline', 'Swap the game audio engine for Web Audio', 'Transcode native textures to ASTC', 'Download base resource Release', 'Assemble ASTC package and verify sealed ZIP', 'Upload verified resource package', 'Upload delta resource package', 'Publish resource Release']
+        steps = ['Test core pipeline', 'Swap the game audio engine for Web Audio', 'Transcode native textures to ASTC', 'Download base resource Release', 'Assemble ASTC package and verify sealed ZIP', 'Upload verified resource package', 'Upload reports', 'Upload delta resource package', 'Publish resource Release']
         self.assertEqual([workflow.index(step) for step in steps], sorted(workflow.index(step) for step in steps))
         self.assertIn('python3 -m unittest discover -s tests -t . -v', workflow)
         self.assertIn('mktemp -d', workflow)
@@ -26,9 +26,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('${BASE_ZIP:+--base "$BASE_ZIP"}', workflow)
         self.assertIn('PACKAGE_TAG="$GAME_VERSION+${PACKAGE_ID:7:8}"', workflow)
         self.assertIn('GardendlessResources-$PACKAGE_TAG-from-$BASE_TAG.zip', workflow)
+        # Packages are uploaded as the ZIP itself, not wrapped in an artifact
+        # ZIP, so a download imports as is; the reports get their own artifact.
+        full = workflow.split('- name: Upload verified resource package', 1)[1].split('- name:', 1)[0]
+        self.assertIn('uses: actions/upload-artifact@v7', full)
+        self.assertIn('archive: false', full)
+        self.assertIn('path: ${{ env.RUN_ROOT }}/release/GardendlessResources-${{ env.PACKAGE_TAG }}.zip', full)
+        self.assertNotIn('REPORTS', full)
+        reports = workflow.split('- name: Upload reports', 1)[1].split('- name:', 1)[0]
+        self.assertIn('name: GardendlessResources-${{ env.PACKAGE_TAG }}-reports', reports)
+        self.assertIn('path: ${{ env.REPORTS }}/', reports)
+        self.assertNotIn('archive: false', reports)
         delta = workflow.split('- name: Upload delta resource package', 1)[1].split('- name:', 1)[0]
         self.assertIn("if: env.BASE_TAG != ''", delta)
-        # Uploaded as the delta ZIP itself, not wrapped in an artifact ZIP.
         self.assertIn('uses: actions/upload-artifact@v7', delta)
         self.assertIn('archive: false', delta)
         self.assertIn('path: ${{ env.RUN_ROOT }}/release/GardendlessResources-${{ env.PACKAGE_TAG }}-from-${{ env.BASE_TAG }}.zip', delta)
