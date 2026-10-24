@@ -28,6 +28,11 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
 
   p.init = function () {
     var self = this;
+    // On iOS WebKit's default ("auto") session leaves this engine silent: the
+    // clips play but nothing is heard. Asking for playback, as the <audio> pool
+    // had, makes it audible in loaders that do not ask for it themselves.
+    var session = window.navigator.audioSession;
+    if (session) session.type = "playback";
     this.context = new (window.AudioContext || window.webkitAudioContext)({sampleRate: sampleRate});
     // The context may start suspended until a gesture; any later tap or key
     // resumes it again.

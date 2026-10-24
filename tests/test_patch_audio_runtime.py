@@ -36,7 +36,7 @@ class PatchDocsTests(unittest.TestCase):
         self.assertEqual((report['audioContextSampleRate'], report['audioCacheBytes'], report['clips']), (32000, 32 * 1024 * 1024, 2))
         program = '''import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
 class Context{constructor(options){this.options=options}}
-globalThis.window={AudioContext:Context,addEventListener(){}};globalThis.document={baseURI:'https://game.test/'};
+globalThis.window={AudioContext:Context,navigator:{},addEventListener(){}};globalThis.document={baseURI:'https://game.test/'};
 globalThis.fetch=async url=>({ok:true,json:async()=>({Music_A:'Music/A b.mp3'})});
 const {start}=await import(pathToFileURL(process.argv[2]).href);await start();
 assert.equal(window.audioEngine.constructor.name,'AudioEngine');assert.deepEqual(window.audioEngine.context.options,{sampleRate:32000});

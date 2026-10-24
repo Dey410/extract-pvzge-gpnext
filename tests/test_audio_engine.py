@@ -16,7 +16,7 @@ class Context{constructor(options){this.options=options;this.currentTime=0;this.
   createBufferSource(){const source={buffer:null,loop:false,loopEnd:0,playbackRate:{value:1},started:null,stops:0,onended:null,disconnected:false,
     connect(){},disconnect(){this.disconnected=true},start(when,offset){this.started={when,offset}},stop(){this.stops++}};sources.push(source);return source}
   createGain(){const gain={gain:new Param(1),connected:false,disconnected:false,connect(){this.connected=true},disconnect(){this.disconnected=true}};gains.push(gain);return gain}}
-globalThis.window={AudioContext:Context,addEventListener(type,fn,capture){(listeners[type]=listeners[type]||[]).push([fn,capture])}};
+globalThis.window={AudioContext:Context,navigator:NAVIGATOR,addEventListener(type,fn,capture){(listeners[type]=listeners[type]||[]).push([fn,capture])}};
 globalThis.fetch=url=>new Promise((resolve,reject)=>fetches.push({url,resolve,reject}));
 function respond(){fetches.at(-1).resolve({ok:true,status:200,arrayBuffer:()=>Promise.resolve(new ArrayBuffer(4))})}
 function decoded(duration,channels=2,rate=32000){return {duration,sampleRate:rate,numberOfChannels:channels,length:Math.round(duration*rate)}}
@@ -32,10 +32,17 @@ const engine=new AudioEngine(manifest,new URL('https://game.test/audio/'));
 
 
 class AudioEngineTests(unittest.TestCase):
-    def run_js(self, scenario, cache=640000):
-        program = HARNESS.replace('ENGINE', ENGINE).replace('CACHE', str(cache)).replace('SCENARIO', scenario)
+    def run_js(self, scenario, cache=640000, navigator="{audioSession:{type:'auto'}}"):
+        program = (HARNESS.replace('NAVIGATOR', navigator).replace('ENGINE', ENGINE).replace('CACHE', str(cache))
+                   .replace('SCENARIO', scenario))
         result = subprocess.run(['node', '-'], input=program, text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_init_asks_for_a_playback_session(self):
+        self.run_js('''assert.equal(window.navigator.audioSession.type,'playback');''')
+
+    def test_init_without_the_audio_session_api_still_creates_the_context(self):
+        self.run_js('''assert.deepEqual(context.options,{sampleRate:32000});''', navigator='{}')
 
     def test_play_fetches_and_decodes_only_on_first_play(self):
         self.run_js('''assert.deepEqual(context.options,{sampleRate:32000});assert.equal(fetches.length,0);
