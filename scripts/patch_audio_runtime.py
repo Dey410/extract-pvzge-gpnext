@@ -24,9 +24,11 @@ AUDIO_COMMANDS = frozenset({
     'audio_cleanup', 'audio_list',
 })
 AUDIO_API_PATTERN = re.compile(r'System\.register\("chunks:///_virtual/TauriAudioAPI\.ts".*?(?=System\.register\(|\Z)', re.DOTALL)
+# 0.16.15 appends more startup calls after the assignment (`window.audioEngine=n,ue(F())}`),
+# so the match ends at the assignment and only requires the statement to end there.
 POOL_PATTERN = re.compile(
     rf'let (?P<engine>{IDENT})=new (?P<pool>{IDENT})(?P<args>\(await {IDENT}\.json\(\),{IDENT}\);'
-    rf'await (?P=engine)\.init\(\),window\.audioEngine=(?P=engine)\}})'
+    rf'await (?P=engine)\.init\(\),window\.audioEngine=(?P=engine))(?=[,}}])'
 )
 
 

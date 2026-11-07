@@ -32,6 +32,9 @@ WebAudio 引擎，方法与池子相同，也保留 60 个声音的上限：
 - 音量和淡出用 GainNode；`setRestartBeforeEnd` 用源节点的 `loopEnd` 在池子同样的位置循环，不靠计时器。
 - 播放和任意点击、按键都会在上下文未运行时调用 `resume()`。挂起与恢复的时机由 iOS 宿主
   （GardendlessLoader 的 `audio_lifecycle.js`）按场景活跃状态处理，资源包里不做挂起/恢复或音频会话类型的绕行。
+- 0.16.15 起游戏支持音乐包：加载时清空 `externalClips`，再用 `registerExternalClip(名字, blob URL)` 逐个登记。
+  引擎同样提供 `externalClips`、`registerExternalClip`、`unregisterExternalClip`，查名字时先查 `manifest.json`
+  再查音乐包，音乐包的 URL 原样取用、解码和缓存规则与游戏音频相同；`listClips` 也包含音乐包音频。
 
 AudioContext 固定为 32 kHz：0.16.0 约 82% 的音效时长、50% 的音乐时长原本就不高于 32 kHz，
 解码后的 PCM 比按 48 kHz 硬件采样率解码少三分之一。补丁只接受已核对的布局：Cocos 3.8.4、

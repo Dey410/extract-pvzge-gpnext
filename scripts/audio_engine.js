@@ -6,6 +6,8 @@
 // switches music on getPosition(), stays on time while a clip decodes or after
 // one fails to decode. Volume and fades use gain, which iPhone WebKit honours
 // where it ignores media element volume.
+// Music packs (0.16.15+) register extra clips by name as ready-made blob URLs,
+// which play through the same path as the game's own clips.
 function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
   "use strict";
   var VOICES = 60;
@@ -14,6 +16,8 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
   function AudioEngine(manifest, audioRoot) {
     this.audioRoot = audioRoot;
     this.manifest = manifest;
+    // name -> URL for music pack clips; the game clears it itself when packs reload.
+    this.externalClips = new Map();
     this.context = null;
     this.nextId = 1;
     this.voices = new Map();
@@ -49,7 +53,22 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
   };
 
   p.nameToPath = function (name) {
-    return this.manifest[name] ?? null;
+    return this.manifest[name] ?? this.externalClips.get(name) ?? null;
+  };
+
+  // Game clips are paths under audio/; music pack clips are already URLs.
+  p._clipUrl = function (name) {
+    var path = this.manifest[name];
+    if (path) return new URL(path.split("/").map(encodeURIComponent).join("/"), this.audioRoot).href;
+    return this.externalClips.get(name) ?? null;
+  };
+
+  p.registerExternalClip = function (name, url) {
+    this.externalClips.set(name, url);
+  };
+
+  p.unregisterExternalClip = function (name) {
+    this.externalClips.delete(name);
   };
 
   p._park = function (clip) {
@@ -180,13 +199,12 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
       console.warn("[audio] pool exhausted, drop:", name);
       return null;
     }
-    var path = this.nameToPath(name);
-    if (!path) {
+    var url = this._clipUrl(name);
+    if (!url) {
       console.warn("[audio] unknown clip:", name);
       return null;
     }
     var self = this, context = this.context;
-    var url = new URL(path.split("/").map(encodeURIComponent).join("/"), this.audioRoot).href;
     var gain = context.createGain();
     gain.gain.value = Math.min(1, Math.max(0, volume));
     gain.connect(context.destination);
@@ -284,7 +302,7 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
   };
 
   p.listClips = function () {
-    return Object.keys(this.manifest);
+    return Object.keys(this.manifest).concat(Array.from(this.externalClips.keys()));
   };
 
   return AudioEngine;
