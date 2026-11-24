@@ -52,13 +52,19 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
     context.resume().catch(function (error) { console.warn("[pvzge-audio] resume failed", error); });
   };
 
+  // A game clip may list variants (0.16.31+); like the game, each play picks one at random.
+  p._gamePath = function (name) {
+    var entry = this.manifest[name];
+    return Array.isArray(entry) ? entry[Math.floor(Math.random() * entry.length)] : entry;
+  };
+
   p.nameToPath = function (name) {
-    return this.manifest[name] ?? this.externalClips.get(name) ?? null;
+    return this._gamePath(name) ?? this.externalClips.get(name) ?? null;
   };
 
   // Game clips are paths under audio/; music pack clips are already URLs.
   p._clipUrl = function (name) {
-    var path = this.manifest[name];
+    var path = this._gamePath(name);
     if (path) return new URL(path.split("/").map(encodeURIComponent).join("/"), this.audioRoot).href;
     return this.externalClips.get(name) ?? null;
   };

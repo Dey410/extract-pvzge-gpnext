@@ -36,10 +36,13 @@ def audio_manifest(docs_dir: Path) -> dict[str, str]:
     manifest = json.loads((docs_dir / 'audio' / 'manifest.json').read_text(encoding='utf-8'))
     if not isinstance(manifest, dict) or not manifest:
         raise PatchError('audio manifest is not a non-empty object')
-    for name, path in manifest.items():
-        parts = PurePosixPath(path).parts if isinstance(path, str) else ()
-        if not parts or path.startswith('/') or '..' in parts or not (docs_dir / 'audio' / path).is_file():
-            raise PatchError(f'audio manifest entry is unsafe or missing: {name} -> {path!r}')
+    # 0.16.31+ lists several variants for some clips; the game plays one at random.
+    for name, entry in manifest.items():
+        paths = entry if isinstance(entry, list) and entry else [entry]
+        for path in paths:
+            parts = PurePosixPath(path).parts if isinstance(path, str) else ()
+            if not parts or path.startswith('/') or '..' in parts or not (docs_dir / 'audio' / path).is_file():
+                raise PatchError(f'audio manifest entry is unsafe or missing: {name} -> {entry!r}')
     return manifest
 
 
