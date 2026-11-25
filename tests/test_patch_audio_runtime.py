@@ -8,6 +8,14 @@ from scripts.patch_audio_runtime import AUDIO_COMMANDS, PatchError, patch_docs, 
 
 ENTRY = '''import{x as O}from"./chunk.js";var z=class{constructor(e,t){this.audioRoot=t,this.manifest=e}async init(){}};
 async function ae(){let e=new URL(`audio/`,document.baseURI),t=await fetch(new URL(`manifest.json`,e));if(!t.ok)throw Error(`Audio manifest HTTP ${t.status}`);let n=new z(await t.json(),e);await n.init(),window.audioEngine=n}export{ae as start};'''
+def mp3(seconds):
+    """Two MPEG-1 Layer III frames (128 kbps, 44.1 kHz, stereo); the Info frame gives the length."""
+    header, length = bytes.fromhex('fffb9000'), 417
+    info = bytearray(header + bytes(length - 4))
+    info[36:48] = b'Info' + (1).to_bytes(4, 'big') + round(seconds * 44100 / 1152).to_bytes(4, 'big')
+    return bytes(info) + header + bytes(length - 4)
+
+
 AUDIO_API = 'System.register("chunks:///_virtual/TauriAudioAPI.ts",[],function(){var commands=[COMMANDS]});System.register("chunks:///_virtual/Other.ts",[],function(){"audio_other"});'
 
 
@@ -17,13 +25,16 @@ class PatchDocsTests(unittest.TestCase):
         for path, text in {
             'src/settings.json': '{"CocosEngine":"3.8.4"}',
             'audio/manifest.json': '{"Music_A":"Music/A b.mp3","Sound_X":"Sounds/x.mp3"}',
-            'audio/Music/A b.mp3': 'music', 'audio/Sounds/x.mp3': 'sound',
+            'audio/Music/A b.mp3': mp3(30), 'audio/Sounds/x.mp3': mp3(1),
             'assets/resources/config.json': '{"types":["cc.ImageAsset","cc.Prefab"]}',
             'assets/main/index.js': AUDIO_API.replace('COMMANDS', ','.join(f'"{c}"' for c in sorted(commands))),
             'assets/game-test.js': ENTRY, 'assets/chunk.js': 'export const x=1;',
         }.items():
             (root / path).parent.mkdir(parents=True, exist_ok=True)
-            (root / path).write_text(text)
+            if isinstance(text, bytes):
+                (root / path).write_bytes(text)
+            else:
+                (root / path).write_text(text)
         return root
 
     def test_entry_creates_the_web_audio_engine_with_the_game_manifest(self):
@@ -34,6 +45,8 @@ class PatchDocsTests(unittest.TestCase):
         report = json.loads((root / 'reports' / 'audio.json').read_text())
         self.assertEqual(report['entry'], 'assets/game-test.js')
         self.assertEqual((report['audioContextSampleRate'], report['audioCacheBytes'], report['clips']), (32000, 32 * 1024 * 1024, 2))
+        self.assertEqual(report['streamedFiles'], ['Music/A b.mp3'])
+        self.assertIn('__pvzgeCreateAudioEngine(32000,33554432,["Music/A b.mp3"]);', entry)
         program = '''import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
 class Context{constructor(options){this.options=options}}
 globalThis.window={AudioContext:Context,navigator:{},addEventListener(){}};globalThis.document={baseURI:'https://game.test/'};

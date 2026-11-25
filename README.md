@@ -16,7 +16,7 @@ Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目�
 元数据备份及已被 ASTC 替代的 PVR/PKM 保留在构建源目录或 reports 中，不进入正式资源 ZIP，不用删除源文件来减包。
 每次构建使用全新的 run 输出目录。
 
-音频全部走 WebAudio，不再用 `<audio>`。0.16.0 起 Cocos 不再播放音频（资源里没有 `cc.AudioClip`），
+音频的音量和淡出全部走 WebAudio 的 GainNode。0.16.0 起 Cocos 不再播放音频（资源里没有 `cc.AudioClip`），
 游戏通过 `TauriAudioAPI` 调用入口模块创建的 `window.audioEngine`，上游实现是 60 个 `<audio>` 元素的池子，
 音频文件放在 `audio/`（`audio/manifest.json` 把名字映射到 mp3）。`<audio>` 在移动端 WebView 有两个问题：
 - BGM 丢失：游戏每帧用 `getPosition()` 判断当前音乐是否到了 `musicLength` 再切下一段。元素加载或播放失败时
@@ -25,16 +25,22 @@ Actions 固定执行核心测试、Cocos 音频修补、ASTC 转换、全新目�
 
 `scripts/patch_audio_runtime.py` 把入口模块里构造池子的那一处换成 `scripts/audio_engine.js` 的
 WebAudio 引擎，方法与池子相同，也保留 60 个声音的上限：
-- 第一次播放时取文件并解码，同一文件按 URL 共享。释放后按解码字节放入 32 MiB 的 LRU，超出时淘汰最早释放的；
+- 时长至少 20 秒的音频（主要是音乐和环境音）不解码，每个声音用自己的 `<audio>` 元素边播边解码，
+  经 `createMediaElementSource` 接到该声音的 GainNode，所以 iPhone 上音量和淡出照样有效。
+  一首 3 分钟的立体声音乐按 32 kHz 整首解码约 45 MB，而且超过缓存上限，每次播放都要重新解码。
+  补丁在构建时读每个 MP3 的帧头（Xing/Info/VBRI 帧数或 CBR 长度）得到时长，把这些文件列给引擎；
+  音乐包音频一律这样播放。元素出错时关掉，按 0.5、1、2、4 秒重开，从时钟位置接入；
+  停顿后与时钟相差超过 0.25 秒才跳转，`setRestartBeforeEnd` 由计时器在循环点把元素跳回开头。
+- 其余短音频第一次播放时取文件并解码，同一文件按 URL 共享。释放后按解码字节放入 32 MiB 的 LRU，超出时淘汰最早释放的；
   单个超过上限的不放入，不会把其他缓存挤掉。
 - 播放时钟从请求播放时开始按 `AudioContext.currentTime × speed` 推进，解码完成后从当前位置接入。
   首次播放会损失解码耗时那一小段开头，但切歌时机不变；解码失败只记错误，时钟照常走，游戏仍会按时切到下一段。
-- 音量和淡出用 GainNode；`setRestartBeforeEnd` 用源节点的 `loopEnd` 在池子同样的位置循环，不靠计时器。
+- 音量和淡出用 GainNode；解码播放的声音由 `setRestartBeforeEnd` 用源节点的 `loopEnd` 在池子同样的位置循环。
 - 播放和任意点击、按键都会在上下文未运行时调用 `resume()`。挂起与恢复的时机由 iOS 宿主
   （GardendlessLoader 的 `audio_lifecycle.js`）按场景活跃状态处理，资源包里不做挂起/恢复或音频会话类型的绕行。
 - 0.16.15 起游戏支持音乐包：加载时清空 `externalClips`，再用 `registerExternalClip(名字, blob URL)` 逐个登记。
   引擎同样提供 `externalClips`、`registerExternalClip`、`unregisterExternalClip`，查名字时先查 `manifest.json`
-  再查音乐包，音乐包的 URL 原样取用、解码和缓存规则与游戏音频相同；`listClips` 也包含音乐包音频。
+  再查音乐包，音乐包的 URL 原样取用、和长音频一样边播边解码；`listClips` 也包含音乐包音频。
 
 AudioContext 固定为 32 kHz：0.16.0 约 82% 的音效时长、50% 的音乐时长原本就不高于 32 kHz，
 解码后的 PCM 比按 48 kHz 硬件采样率解码少三分之一。补丁只接受已核对的布局：Cocos 3.8.4、
@@ -46,7 +52,9 @@ ASTC 固定采用 `astcenc 5.6.0 -cl -fast`，每编码进程一个线程。规�
 指定旋涡图集、最大边不超过 512 或 PNG 位率至少 6 bits/pixel 用 4×4；
 最大边至少 2048 且最大可见连通区占比至少 0.35 用 6×6；其余用 8×8。
 Pillow 固定 12.1.1，AVIF/WebP 按解码 RGBA PNG 大小分类。已有 ASTC 经块、尺寸和长度核对后复用。
-元数据只选择一个 ASTC 格式，设备必须支持 ASTC。
+元数据只选择一个 ASTC 格式，设备必须支持 ASTC。同一步在 `src/settings.json` 的 `engine.macros` 写入
+`CLEANUP_IMAGE_CACHE: true`：Cocos 3.8.4 默认在贴图上传 GPU 后仍在 JS 堆里保留整份 ASTC 数据。
+这个开关关掉的动态合图只处理未压缩图片，转换后所有 native 贴图都是 ASTC；游戏代码也不回读贴图像素。
 
 包包含 `docs/__gardendless/package/resource-manifest.json`（恰八字段）及
 `file-index.json`（`{schemaVersion:1,files:[{path,sizeBytes,sha256}]}`）。索引覆盖所有运行文件，
