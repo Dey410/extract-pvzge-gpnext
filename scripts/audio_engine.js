@@ -1,17 +1,28 @@
 // Web Audio stand-in for the game's window.audioEngine, the pool of <audio>
 // elements behind TauriAudioAPI, with the same methods and voice limit.
-// A clip is fetched and decoded when it first plays and shared by URL;
-// released clips stay in a cache bounded in decoded bytes.
+// A short clip is fetched and decoded when it first plays and shared by URL;
+// released clips stay in a cache bounded in decoded bytes. A long clip (the
+// build lists them in streamPaths) streams through its own media element
+// routed into the voice's gain instead, since a 3-minute track is about 45 MB
+// of PCM once decoded; a failed element is opened again at the voice's clock.
 // A voice's clock runs from the play request at its rate, so the game, which
-// switches music on getPosition(), stays on time while a clip decodes or after
-// one fails to decode. Volume and fades use gain, which iPhone WebKit honours
+// switches music on getPosition(), stays on time while a clip decodes or loads,
+// or after one fails. Volume and fades use gain, which iPhone WebKit honours
 // where it ignores media element volume.
 // Music packs (0.16.15+) register extra clips by name as ready-made blob URLs,
-// which play through the same path as the game's own clips.
-function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
+// which stream like the game's long clips.
+function __pvzgeCreateAudioEngine(sampleRate, cacheBytes, streamPaths) {
   "use strict";
   var VOICES = 60;
   var DEFAULT_VOLUME = 0.9;
+  var STREAMS = new Set(streamPaths || []);
+  var MEDIA_RETRIES = 4;
+  var MEDIA_RETRY_MS = 500;
+  // An element is moved to the clock when they differ by more than this:
+  // a small gap after explicit changes, a larger one after it stalls and
+  // plays again, so seeking does not chase its own latency.
+  var SEEK_GAP = 0.05;
+  var DRIFT_GAP = 0.25;
 
   function AudioEngine(manifest, audioRoot) {
     this.audioRoot = audioRoot;
@@ -37,7 +48,13 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
     // had, makes it audible in loaders that do not ask for it themselves.
     var session = window.navigator.audioSession;
     if (session) session.type = "playback";
-    this.context = new (window.AudioContext || window.webkitAudioContext)({sampleRate: sampleRate});
+    var context = this.context = new (window.AudioContext || window.webkitAudioContext)({sampleRate: sampleRate});
+    // The clock stops while the context is suspended; streamed voices rejoin it.
+    if (typeof context.addEventListener === "function") {
+      context.addEventListener("statechange", function () {
+        if (context.state === "running") self._resumeMedia(false);
+      });
+    }
     // The context may start suspended until a gesture; any later tap or key
     // resumes it again.
     ["touchend", "mouseup", "keydown"].forEach(function (type) {
@@ -48,8 +65,23 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
 
   p._wake = function () {
     var context = this.context;
-    if (context.state === "running") return;
-    context.resume().catch(function (error) { console.warn("[pvzge-audio] resume failed", error); });
+    if (context.state !== "running") {
+      context.resume().catch(function (error) { console.warn("[pvzge-audio] resume failed", error); });
+    }
+    // A media element refused without a gesture tries again on the next one.
+    this._resumeMedia(true);
+  };
+
+  // Brings ticking streamed voices back to the clock; pausedOnly leaves the
+  // ones already playing alone, so frequent calls never seek them.
+  p._resumeMedia = function (pausedOnly) {
+    var self = this;
+    this.voices.forEach(function (voice) {
+      var media = voice.media;
+      if (media && voice.ticking && media.readyState >= 1 && (!pausedOnly || media.paused)) {
+        self._syncMedia(voice, DRIFT_GAP);
+      }
+    });
   };
 
   // A game clip may list variants (0.16.31+); like the game, each play picks one at random.
@@ -63,10 +95,14 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
   };
 
   // Game clips are paths under audio/; music pack clips are already URLs.
-  p._clipUrl = function (name) {
+  p._clip = function (name) {
     var path = this._gamePath(name);
-    if (path) return new URL(path.split("/").map(encodeURIComponent).join("/"), this.audioRoot).href;
-    return this.externalClips.get(name) ?? null;
+    if (path) {
+      return {url: new URL(path.split("/").map(encodeURIComponent).join("/"), this.audioRoot).href,
+        stream: STREAMS.has(path)};
+    }
+    var url = this.externalClips.get(name);
+    return url ? {url: url, stream: true} : null;
   };
 
   p.registerExternalClip = function (name, url) {
@@ -130,23 +166,29 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
     else if (!clip.pending) this.clips.delete(url);
   };
 
+  // Seconds of the voice's clip once known, from its decoded buffer or its media element.
+  p._duration = function (voice) {
+    return voice.buffer ? voice.buffer.duration : voice.duration;
+  };
+
   // Media seconds, held inside the clip once its length is known; a voice with
   // restartBeforeEnd wraps at its loop end like the pool's restart timer.
   p._position = function (voice) {
     var position = voice.offset;
     if (voice.ticking) position += (this.context.currentTime - voice.anchor) * voice.speed;
-    var buffer = voice.buffer;
-    if (buffer && buffer.duration > 0) {
+    var duration = this._duration(voice);
+    if (duration > 0) {
       var end = this._loopEnd(voice);
-      position = end === null ? Math.min(position, buffer.duration) : position % end;
+      position = end === null ? Math.min(position, duration) : position % end;
     }
     return position;
   };
 
   p._loopEnd = function (voice) {
-    if (voice.restartBeforeEnd === null || !voice.buffer) return null;
-    var end = voice.buffer.duration - voice.restartBeforeEnd / voice.speed;
-    return end > 0 ? end : voice.buffer.duration;
+    var duration = this._duration(voice);
+    if (voice.restartBeforeEnd === null || !(duration > 0)) return null;
+    var end = duration - voice.restartBeforeEnd / voice.speed;
+    return end > 0 ? end : duration;
   };
 
   p._rebase = function (voice) {
@@ -188,14 +230,116 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
     source.disconnect();
   };
 
+  p._openMedia = function (voice) {
+    var self = this, media = new Audio();
+    media.preload = "auto";
+    // Like a decoded clip's playbackRate, a faster voice also plays higher.
+    media.preservesPitch = false;
+    media.webkitPreservesPitch = false;
+    voice.media = media;
+    voice.node = this.context.createMediaElementSource(media);
+    voice.node.connect(voice.gain);
+    function current() { return voice.media === media; }
+    media.addEventListener("loadedmetadata", function () {
+      if (!current()) return;
+      if (isFinite(media.duration) && media.duration > 0) voice.duration = media.duration;
+      self._syncMedia(voice, SEEK_GAP);
+    });
+    media.addEventListener("playing", function () {
+      if (!current()) return;
+      voice.retries = 0;
+      self._syncMedia(voice, DRIFT_GAP);
+    });
+    media.addEventListener("ended", function () {
+      if (!current()) return;
+      if (self._loopEnd(voice) === null) self._release(voice);
+      else self._syncMedia(voice, SEEK_GAP);
+    });
+    media.addEventListener("error", function () {
+      if (current()) self._mediaFailed(voice);
+    });
+    media.src = voice.url;
+  };
+
+  // Moves the element to the clock, plays or pauses it with the voice and
+  // schedules the restart of a looping voice.
+  p._syncMedia = function (voice, gap) {
+    var media = voice.media;
+    if (!media || media.readyState < 1) return;
+    var position = this._position(voice);
+    if (this._loopEnd(voice) === null && voice.duration !== null && position >= voice.duration) {
+      this._release(voice);
+      return;
+    }
+    if (Math.abs(media.currentTime - position) > gap) media.currentTime = position;
+    media.playbackRate = voice.speed;
+    if (!voice.ticking) media.pause();
+    else if (media.paused) this._playMedia(voice, media);
+    this._scheduleRestart(voice);
+  };
+
+  p._playMedia = function (voice, media) {
+    var result = media.play();
+    if (result && typeof result.catch === "function") {
+      result.catch(function (error) {
+        if (voice.media !== media || (error && error.name === "AbortError")) return;
+        console.warn("[audio] media play refused:", voice.url, error);
+      });
+    }
+  };
+
+  p._scheduleRestart = function (voice) {
+    clearTimeout(voice.restartTimer);
+    voice.restartTimer = null;
+    var end = this._loopEnd(voice);
+    if (end === null || !voice.ticking || !voice.media) return;
+    var self = this, delay = (end - this._position(voice)) / voice.speed * 1000;
+    // By then the clock has wrapped and the element moves back; a timer that
+    // fires a little early only schedules itself again.
+    voice.restartTimer = setTimeout(function () {
+      voice.restartTimer = null;
+      self._syncMedia(voice, SEEK_GAP);
+    }, Math.max(delay, 1));
+  };
+
+  p._closeMedia = function (voice) {
+    clearTimeout(voice.restartTimer);
+    voice.restartTimer = null;
+    var media = voice.media;
+    if (!media) return;
+    voice.media = null;
+    media.pause();
+    // Dropping the source releases the element's buffered data.
+    media.removeAttribute("src");
+    media.load();
+    voice.node.disconnect();
+    voice.node = null;
+  };
+
+  // Like a failed decode, the clock keeps running; the element is opened
+  // again a few times with growing delays and joins at the clock.
+  p._mediaFailed = function (voice) {
+    var self = this, error = voice.media.error;
+    console.error("[audio] media failed:", voice.url, error ? error.code : "");
+    this._closeMedia(voice);
+    if (voice.retries >= MEDIA_RETRIES) return;
+    var delay = MEDIA_RETRY_MS * Math.pow(2, voice.retries++);
+    voice.retryTimer = setTimeout(function () {
+      voice.retryTimer = null;
+      if (self.voices.get(voice.id) === voice) self._openMedia(voice);
+    }, delay);
+  };
+
   p._release = function (voice) {
     if (!this.voices.delete(voice.id)) return;
     clearTimeout(voice.fadeTimer);
+    clearTimeout(voice.retryTimer);
     this._stopSource(voice);
+    this._closeMedia(voice);
     voice.gain.disconnect();
     voice.buffer = null;
     voice.ticket++;
-    this._releaseClip(voice.url);
+    if (!voice.stream) this._releaseClip(voice.url);
   };
 
   p.play = function (name, speed, volume) {
@@ -205,22 +349,27 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
       console.warn("[audio] pool exhausted, drop:", name);
       return null;
     }
-    var url = this._clipUrl(name);
-    if (!url) {
+    var clip = this._clip(name);
+    if (!clip) {
       console.warn("[audio] unknown clip:", name);
       return null;
     }
-    var self = this, context = this.context;
+    var self = this, context = this.context, url = clip.url;
     var gain = context.createGain();
     gain.gain.value = Math.min(1, Math.max(0, volume));
     gain.connect(context.destination);
     var voice = {
-      id: this.nextId++, url: url, speed: speed, volume: gain.gain.value, gain: gain,
-      buffer: null, source: null, ticking: true, offset: 0, anchor: context.currentTime,
-      restartBeforeEnd: null, fading: false, fadeTimer: null, ticket: 0
+      id: this.nextId++, url: url, stream: clip.stream, speed: speed, volume: gain.gain.value, gain: gain,
+      buffer: null, source: null, media: null, node: null, duration: null, ticking: true, offset: 0,
+      anchor: context.currentTime, restartBeforeEnd: null, fading: false, fadeTimer: null,
+      restartTimer: null, retryTimer: null, retries: 0, ticket: 0
     };
     this.voices.set(voice.id, voice);
     this._wake();
+    if (clip.stream) {
+      this._openMedia(voice);
+      return voice.id;
+    }
     var ticket = voice.ticket;
     this._acquire(url).then(function (buffer) {
       if (ticket !== voice.ticket) return;
@@ -245,20 +394,20 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
     if (!voice || voice.ticking === !!playing) return;
     this._rebase(voice);
     voice.ticking = !!playing;
-    if (!playing) this._stopSource(voice);
-    else {
-      this._wake();
-      if (voice.buffer) this._startSource(voice);
-    }
+    if (playing) this._wake();
+    if (voice.media) this._syncMedia(voice, SEEK_GAP);
+    else if (!playing) this._stopSource(voice);
+    else if (voice.buffer) this._startSource(voice);
   };
 
   p.seek = function (id, seconds) {
     var voice = this.voices.get(id);
     if (!voice) return;
-    var position = Math.max(0, seconds);
-    voice.offset = voice.buffer ? Math.min(position, voice.buffer.duration) : position;
+    var position = Math.max(0, seconds), duration = this._duration(voice);
+    voice.offset = duration === null ? position : Math.min(position, duration);
     voice.anchor = this.context.currentTime;
-    if (voice.source) {
+    if (voice.media) this._syncMedia(voice, SEEK_GAP);
+    else if (voice.source) {
       this._stopSource(voice);
       this._startSource(voice);
     }
@@ -267,12 +416,12 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
   p.getPosition = function (id) {
     var voice = this.voices.get(id);
     if (!voice) return [0, null];
-    return [this._position(voice), voice.buffer ? voice.buffer.duration : null];
+    return [this._position(voice), this._duration(voice)];
   };
 
   p.getDuration = function (id) {
     var voice = this.voices.get(id);
-    return voice && voice.buffer ? voice.buffer.duration : null;
+    return voice ? this._duration(voice) : null;
   };
 
   p.fadeOut = function (id, durationMs) {
@@ -291,7 +440,8 @@ function __pvzgeCreateAudioEngine(sampleRate, cacheBytes) {
     if (!voice) return;
     this._rebase(voice);
     voice.restartBeforeEnd = beforeMs / 1000;
-    if (voice.source) {
+    if (voice.media) this._syncMedia(voice, SEEK_GAP);
+    else if (voice.source) {
       this._stopSource(voice);
       this._startSource(voice);
     }

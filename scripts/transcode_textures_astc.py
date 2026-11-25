@@ -426,6 +426,28 @@ def plan_metadata(jobs: list[TextureJob]) -> dict[Path, bytes]:
     return {path: _json_bytes(document) for path, document in documents.items()}
 
 
+def plan_image_cache_cleanup(docs_dir: Path) -> tuple[Path, bytes]:
+    """Have Cocos drop each ImageAsset's ASTC bytes once the texture is on the GPU.
+
+    Cocos 3.8.4 keeps them by default (CLEANUP_IMAGE_CACHE false), so every
+    loaded texture also sits in the JavaScript heap at its full ASTC size. The
+    dynamic atlas that the flag turns off only packs uncompressed images, and
+    after this step every native texture is ASTC.
+    """
+    path = docs_dir / "src" / "settings.json"
+    if not path.is_file():
+        raise AstcError(f"Cocos settings are missing: {path}")
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    engine = settings.get("engine") if isinstance(settings, dict) else None
+    if not isinstance(engine, dict):
+        raise AstcError(f"{path}: expected an engine object")
+    macros = engine.setdefault("macros", {})
+    if not isinstance(macros, dict):
+        raise AstcError(f"{path}: engine.macros is not an object")
+    macros["CLEANUP_IMAGE_CACHE"] = True
+    return path, _json_bytes(settings)
+
+
 def write_report(args: argparse.Namespace, jobs: list[TextureJob],
                  astc_bytes: int, metadata_count: int, elapsed: float,
                  backup_dir: Path) -> None:
@@ -459,7 +481,8 @@ def write_report(args: argparse.Namespace, jobs: list[TextureJob],
         *[f"ASTC {block}: {sum(j.block == block for j in jobs)}" for block in ASTC_FORMAT_CODES],
         f"Source bytes (retained): {sum(j.source_bytes for j in jobs)}",
         f"ASTC bytes (total, including reused): {astc_bytes}",
-        f"ImageAsset JSON files rewritten: {metadata_count}",
+        f"Metadata JSON files rewritten (ImageAssets and src/settings.json): {metadata_count}",
+        "Cocos CLEANUP_IMAGE_CACHE: true (uploaded ASTC bytes leave the JavaScript heap)",
         f"Original metadata backup: {backup_dir}",
         f"Per-texture map: {map_path}",
         f"Intermediate PNG files (retained): {args.work_dir}",
@@ -579,6 +602,8 @@ def main(argv: list[str] | None = None) -> int:
         jobs = discover_jobs(args)
         # Resolve every metadata target before invoking the encoder or changing references.
         documents = plan_metadata(jobs)
+        settings_path, settings = plan_image_cache_cleanup(args.docs_dir)
+        documents[settings_path] = settings
         args.report_path.parent.mkdir(parents=True, exist_ok=True)
         backup_dir = Path(tempfile.mkdtemp(
             prefix="astc-original-metadata-", dir=args.report_path.parent

@@ -68,6 +68,9 @@ class TextureTests(unittest.TestCase):
                                 "--jobs", "1"])
         self.args.work_dir = self.root / "decoded"
         self.args.work_dir.mkdir()
+        self.settings = self.docs / "src" / "settings.json"
+        self.settings.parent.mkdir(parents=True)
+        self.settings.write_text('{"CocosEngine":"3.8.4","engine":{"macros":{}}}', encoding="utf-8")
 
     def texture(self, stem="aa1111", extension=".png", fmt="AVIF", size=(65, 33)):
         path = self.bundle / "native" / stem[:2] / (stem + extension)
@@ -260,6 +263,8 @@ class TextureTests(unittest.TestCase):
         self.assertEqual((info.width, info.height, info.block_x, info.block_y), (65, 33, 4, 4))
         self.assertEqual(output.stat().st_size, info.expected_size)
         self.assertEqual(json.loads(metadata.read_text())[0]["fmt"], "7@89")
+        self.assertEqual(json.loads(self.settings.read_text())["engine"]["macros"],
+                         {"CLEANUP_IMAGE_CACHE": True})
         self.assertEqual(source.read_bytes(), source_before)
         backup = next(self.args.report_path.parent.glob("astc-original-metadata-*"))
         self.assertEqual((backup / metadata.relative_to(self.docs)).read_bytes(), metadata_before)
